@@ -35,3 +35,21 @@ poetry run python -m scripts.create_superuser
 
 El script crea (si no existen) el rol de sistema `system_admin` y los permisos administrativos
 necesarios. Los permisos y roles posteriores se administran por API.
+
+## Entorno Docker de desarrollo
+
+`docker-compose.dev.yml` levanta la API y PostgreSQL `18.4-alpine` en contenedores separados.
+La imagen está fijada a la versión menor actual para evitar cambios inesperados, y el volumen se
+monta en la ruta de datos específica de PostgreSQL 18.
+PostgreSQL se expone en `localhost:5433`, para no competir con una instalación local que use
+el puerto predeterminado `5432`; desde la API Docker se mantiene en `postgres:5432`.
+
+Antes de iniciarlo define, en tu entorno, `POSTGRES_PASSWORD` y `JWT_SECRET_KEY`; de forma
+opcional puedes definir `POSTGRES_USER` y `POSTGRES_DB`. Después usa:
+
+```bash
+docker compose -f docker-compose.dev.yml up --build
+```
+
+Esto no ejecuta Alembic. Cuando decidas aplicar las migraciones, hazlo explícitamente desde el
+contenedor `api` con `poetry run alembic upgrade head`.
