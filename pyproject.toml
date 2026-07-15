@@ -1,0 +1,44 @@
+[tool.poetry]
+name = "lavalienteservice"
+version = "0.1.0"
+description = "Servicio de gestión para La Valiente."
+authors = ["La Valiente <engineering@lavaliente.local>"]
+readme = "README.md"
+packages = [{ include = "src" }]
+
+[tool.poetry.dependencies]
+python = ">=3.14,<3.15"
+fastapi = { version = "^0.115.0", extras = ["standard"] }
+sqlalchemy = { version = "^2.0.0", extras = ["asyncio"] }
+asyncpg = "^0.30.0"
+psycopg = { version = "^3.2.0", extras = ["binary"] }
+alembic = "^1.14.0"
+pydantic-settings = "^2.7.0"
+pwdlib = { version = "^0.2.0", extras = ["argon2"] }
+pyjwt = { version = "^2.10.0", extras = ["crypto"] }
+email-validator = "^2.2.0"
+
+[tool.poetry.group.dev.dependencies]
+pytest = "^8.3.0"
+pytest-asyncio = "^0.24.0"
+testcontainers = { version = "^4.9.0", extras = ["postgres"] }
+ruff = "^0.8.0"
+mypy = "^1.14.0"
+
+[build-system]
+requires = ["poetry-core>=2.0.0"]
+build-backend = "poetry.core.masonry.api"
+
+[tool.pytest.ini_options]
+asyncio_mode = "auto"
+testpaths = ["tests"]
+
+[tool.mypy]
+python_version = "3.14"
+strict = true
+plugins = ["pydantic.mypy"]
+exclude = ["migrations"]
+
+[[tool.mypy.overrides]]
+module = ["alembic.*", "testcontainers.*"]
+ignore_missing_imports = true

@@ -1,0 +1,20 @@
+name: CI
+
+on:
+  pull_request:
+  push:
+    branches: [main]
+
+jobs:
+  quality:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.14"
+      - uses: snok/install-poetry@v1
+      - run: poetry install
+      - run: poetry run ruff check src migrations scripts tests
+      - run: poetry run mypy src
+      - run: poetry run pytest tests/unit

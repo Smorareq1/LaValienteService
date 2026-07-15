@@ -1,0 +1,13 @@
+target-version = "py314"
+line-length = 100
+
+[lint]
+select = ["E", "F", "I", "B", "UP", "SIM", "C90", "RUF"]
+ignore = ["B008"]
+
+[lint.mccabe]
+max-complexity = 10
+
+[format]
+quote-style = "double"
+indent-style = "space"
