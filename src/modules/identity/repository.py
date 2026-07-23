@@ -1,13 +1,15 @@
 from datetime import UTC, datetime
 from uuid import UUID
 
-from sqlalchemy import Select, select
+from sqlalchemy import Select, or_, select, update
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import selectinload
 
 from src.modules.identity.models import (
     AuthSession,
+    PasswordResetToken,
     Permission,
+    RefreshToken,
     Role,
     RolePermission,
     User,
@@ -36,6 +38,17 @@ class IdentityRepository:
         statement = self._user_with_access_query().where(User.email == email)
         return await self.session.scalar(statement)
 
+    async def get_user_by_username(self, username: str) -> User | None:
+        statement = self._user_with_access_query().where(User.username == username)
+        return await self.session.scalar(statement)
+
+    async def get_user_by_identifier(self, identifier: str) -> User | None:
+        """Resolve a user by username or email (both stored lowercase)."""
+        statement = self._user_with_access_query().where(
+            or_(User.username == identifier, User.email == identifier)
+        )
+        return await self.session.scalar(statement)
+
     async def get_user_with_access(self, user_id: UUID) -> User | None:
         statement = self._user_with_access_query().where(User.id == user_id)
         return await self.session.scalar(statement)
@@ -45,17 +58,31 @@ class IdentityRepository:
             AuthSession.id == session_id,
             AuthSession.user_id == user_id,
             AuthSession.revoked_at.is_(None),
-            AuthSession.expires_at > datetime.now(UTC),
+            AuthSession.absolute_expires_at > datetime.now(UTC),
         )
         return await self.session.scalar(statement)
 
-    async def get_active_session_by_refresh_hash(self, token_hash: str) -> AuthSession | None:
-        statement = select(AuthSession).where(
-            AuthSession.refresh_token_hash == token_hash,
-            AuthSession.revoked_at.is_(None),
-            AuthSession.expires_at > datetime.now(UTC),
+    async def get_refresh_token(self, token_hash: str) -> RefreshToken | None:
+        """Fetch a refresh token with its session, regardless of state (the service decides)."""
+        statement = (
+            select(RefreshToken)
+            .options(selectinload(RefreshToken.session))
+            .where(RefreshToken.token_hash == token_hash)
         )
         return await self.session.scalar(statement)
+
+    async def list_active_sessions(self, user_id: UUID) -> list[AuthSession]:
+        statement = (
+            select(AuthSession)
+            .where(
+                AuthSession.user_id == user_id,
+                AuthSession.revoked_at.is_(None),
+                AuthSession.absolute_expires_at > datetime.now(UTC),
+            )
+            .order_by(AuthSession.created_at.desc())
+        )
+        result = await self.session.scalars(statement)
+        return list(result)
 
     async def get_permission(self, permission_id: UUID) -> Permission | None:
         return await self.session.get(Permission, permission_id)
@@ -85,6 +112,9 @@ class IdentityRepository:
     def add(self, entity: object) -> None:
         self.session.add(entity)
 
+    async def flush(self) -> None:
+        await self.session.flush()
+
     async def commit(self) -> None:
         await self.session.commit()
 
@@ -94,6 +124,50 @@ class IdentityRepository:
     async def revoke_session(self, session: AuthSession) -> None:
         session.revoked_at = datetime.now(UTC)
         await self.commit()
+
+    async def revoke_all_sessions(self, user_id: UUID) -> None:
+        await self.session.execute(
+            update(AuthSession)
+            .where(AuthSession.user_id == user_id, AuthSession.revoked_at.is_(None))
+            .values(revoked_at=datetime.now(UTC))
+        )
+
+    async def invalidate_reset_tokens(self, user_id: UUID) -> None:
+        await self.session.execute(
+            update(PasswordResetToken)
+            .where(PasswordResetToken.user_id == user_id, PasswordResetToken.used_at.is_(None))
+            .values(used_at=datetime.now(UTC))
+        )
+
+    async def get_active_reset_token(self, user_id: UUID) -> PasswordResetToken | None:
+        statement = (
+            select(PasswordResetToken)
+            .where(
+                PasswordResetToken.user_id == user_id,
+                PasswordResetToken.used_at.is_(None),
+                PasswordResetToken.expires_at > datetime.now(UTC),
+            )
+            .order_by(PasswordResetToken.created_at.desc())
+            .limit(1)
+        )
+        return await self.session.scalar(statement)
+
+    async def list_users(self) -> list[User]:
+        statement = (
+            self._user_with_access_query().order_by(User.username)
+        )
+        result = await self.session.scalars(statement)
+        return list(result.unique())
+
+    async def list_roles(self) -> list[Role]:
+        result = await self.session.scalars(select(Role).order_by(Role.code))
+        return list(result)
+
+    async def list_permissions(self) -> list[Permission]:
+        result = await self.session.scalars(
+            select(Permission).order_by(Permission.resource, Permission.action)
+        )
+        return list(result)
 
     async def replace_role_permissions(self, role: Role, permissions: list[Permission]) -> None:
         role.permission_assignments = [

@@ -3,16 +3,21 @@ from uuid import UUID
 
 from pydantic import BaseModel, ConfigDict, EmailStr, Field
 
-from src.modules.identity.models import PermissionEffect
+from src.modules.identity.models import PermissionEffect, ResetChannel
+
+USERNAME_PATTERN = r"^[a-z][a-z0-9_.]{2,49}$"
 
 
 class UserRegistration(BaseModel):
-    email: EmailStr
-    password: str = Field(min_length=12, max_length=128)
+    username: str = Field(pattern=USERNAME_PATTERN)
+    password: str = Field(min_length=8, max_length=128)
+    email: EmailStr | None = None
+    phone: str | None = Field(default=None, pattern=r"^\+?[0-9]{8,15}$")
+    full_name: str | None = Field(default=None, min_length=2, max_length=120)
 
 
 class LoginRequest(BaseModel):
-    email: EmailStr
+    identifier: str = Field(min_length=3, max_length=320, description="Username or email.")
     password: str = Field(min_length=1, max_length=128)
 
 
@@ -20,10 +25,33 @@ class RefreshRequest(BaseModel):
     refresh_token: str = Field(min_length=32, max_length=512)
 
 
+class ForgotPasswordRequest(BaseModel):
+    identifier: str = Field(min_length=3, max_length=320, description="Username or email.")
+    channel: ResetChannel | None = Field(
+        default=None, description="Preferred delivery channel; defaults to email, then SMS."
+    )
+
+
+class ResetPasswordRequest(BaseModel):
+    identifier: str = Field(min_length=3, max_length=320, description="Username or email.")
+    code: str = Field(pattern=r"^[0-9]{6}$")
+    new_password: str = Field(min_length=8, max_length=128)
+
+
 class TokenPair(BaseModel):
     access_token: str
     refresh_token: str
     token_type: str = "bearer"
+    expires_in: int = Field(description="Access-token lifetime in seconds.")
+
+
+class SessionRead(BaseModel):
+    id: UUID
+    user_agent: str | None
+    ip_address: str | None
+    created_at: datetime
+    last_used_at: datetime | None
+    is_current: bool
 
 
 class PermissionCreate(BaseModel):
@@ -77,6 +105,17 @@ class UserPermissionReplace(BaseModel):
 
 class CurrentUserRead(BaseModel):
     id: UUID
-    email: EmailStr
+    username: str
+    email: EmailStr | None
+    full_name: str | None
     roles: list[str]
     permissions: list[str]
+
+
+class UserSummaryRead(BaseModel):
+    id: UUID
+    username: str
+    email: EmailStr | None
+    full_name: str | None
+    is_active: bool
+    roles: list[str]

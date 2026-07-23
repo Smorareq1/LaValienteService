@@ -1,15 +1,19 @@
+from datetime import UTC, datetime, timedelta
 from uuid import UUID
 
 from sqlalchemy.exc import IntegrityError
 
+from src.core.config import get_settings
 from src.core.exceptions import (
     AuthenticationError,
     AuthorizationError,
     ConflictError,
     NotFoundError,
 )
+from src.core.notifications import NotificationService, get_notification_service
 from src.core.security import (
     create_access_token,
+    create_password_reset_code,
     create_refresh_token,
     decode_access_token,
     hash_opaque_token,
@@ -18,8 +22,11 @@ from src.core.security import (
 )
 from src.modules.identity.models import (
     AuthSession,
+    PasswordResetToken,
     Permission,
     PermissionEffect,
+    RefreshToken,
+    ResetChannel,
     Role,
     User,
     UserPermission,
@@ -27,56 +34,175 @@ from src.modules.identity.models import (
 from src.modules.identity.repository import IdentityRepository
 from src.modules.identity.schemas import (
     CurrentUserRead,
+    ForgotPasswordRequest,
     LoginRequest,
     PermissionCreate,
+    ResetPasswordRequest,
     RoleCreate,
+    SessionRead,
     TokenPair,
     UserRegistration,
+    UserSummaryRead,
 )
 
 
 class IdentityService:
-    """Use cases for login and dynamic role-based authorization."""
+    """Use cases for login, password recovery, and dynamic role-based authorization."""
 
-    def __init__(self, repository: IdentityRepository) -> None:
+    def __init__(
+        self,
+        repository: IdentityRepository,
+        notifications: NotificationService | None = None,
+    ) -> None:
         self.repository = repository
+        self.notifications = notifications or get_notification_service()
 
     async def register(self, data: UserRegistration) -> User:
-        email = str(data.email).lower()
-        if await self.repository.get_user_by_email(email):
+        username = data.username.lower()
+        if await self.repository.get_user_by_username(username):
+            raise ConflictError("An account with this username already exists.")
+        email = str(data.email).lower() if data.email else None
+        if email and await self.repository.get_user_by_email(email):
             raise ConflictError("An account with this email already exists.")
-        user = User(email=email, password_hash=hash_password(data.password))
+        user = User(
+            username=username,
+            email=email,
+            phone=data.phone,
+            full_name=data.full_name,
+            password_hash=hash_password(data.password),
+        )
         self.repository.add(user)
         await self.repository.commit()
         await self.repository.refresh(user)
         return user
 
-    async def login(self, data: LoginRequest) -> TokenPair:
-        user = await self.repository.get_user_by_email(str(data.email).lower())
+    async def login(
+        self,
+        data: LoginRequest,
+        user_agent: str | None = None,
+        ip_address: str | None = None,
+    ) -> TokenPair:
+        user = await self.repository.get_user_by_identifier(data.identifier.strip().lower())
         if (
             user is None
             or not user.is_active
             or not verify_password(data.password, user.password_hash)
         ):
-            raise AuthenticationError("Invalid email or password.")
-        return await self._create_session_tokens(user)
+            raise AuthenticationError("Invalid username or password.")
+        return await self._create_session_tokens(user, user_agent, ip_address)
+
+    async def request_password_reset(self, data: ForgotPasswordRequest) -> None:
+        """Issue a recovery code. Silent on unknown accounts to avoid enumeration."""
+        user = await self.repository.get_user_by_identifier(data.identifier.strip().lower())
+        if user is None or not user.is_active:
+            return
+        channel, destination = self._resolve_reset_channel(user, data.channel)
+        if channel is None or destination is None:
+            return
+        code, code_hash, expires_at = create_password_reset_code()
+        await self.repository.invalidate_reset_tokens(user.id)
+        self.repository.add(
+            PasswordResetToken(
+                user_id=user.id,
+                code_hash=code_hash,
+                channel=channel,
+                destination=destination,
+                expires_at=expires_at,
+            )
+        )
+        await self.repository.commit()
+        self.notifications.send_password_reset_code(channel.value, destination, code)
+
+    async def reset_password(self, data: ResetPasswordRequest) -> None:
+        generic_error = AuthenticationError("Invalid or expired recovery code.")
+        user = await self.repository.get_user_by_identifier(data.identifier.strip().lower())
+        if user is None or not user.is_active:
+            raise generic_error
+        token = await self.repository.get_active_reset_token(user.id)
+        if token is None:
+            raise generic_error
+        settings = get_settings()
+        if token.attempts >= settings.reset_code_max_attempts:
+            token.used_at = datetime.now(UTC)
+            await self.repository.commit()
+            raise generic_error
+        if hash_opaque_token(data.code) != token.code_hash:
+            token.attempts += 1
+            await self.repository.commit()
+            raise generic_error
+        token.used_at = datetime.now(UTC)
+        user.password_hash = hash_password(data.new_password)
+        await self.repository.revoke_all_sessions(user.id)
+        await self.repository.commit()
+
+    @staticmethod
+    def _resolve_reset_channel(
+        user: User, preferred: ResetChannel | None
+    ) -> tuple[ResetChannel | None, str | None]:
+        if preferred is ResetChannel.SMS and user.phone:
+            return ResetChannel.SMS, user.phone
+        if preferred is ResetChannel.EMAIL and user.email:
+            return ResetChannel.EMAIL, user.email
+        if user.email:
+            return ResetChannel.EMAIL, user.email
+        if user.phone:
+            return ResetChannel.SMS, user.phone
+        return None, None
 
     async def refresh(self, refresh_token: str) -> TokenPair:
-        session = await self.repository.get_active_session_by_refresh_hash(
-            hash_opaque_token(refresh_token)
-        )
-        if session is None:
-            raise AuthenticationError("Invalid or expired refresh token.")
+        """Rotate the refresh token inside its session, detecting stolen-token reuse."""
+        invalid = AuthenticationError("Invalid or expired refresh token.")
+        token = await self.repository.get_refresh_token(hash_opaque_token(refresh_token))
+        if token is None:
+            raise invalid
+        now = datetime.now(UTC)
+        session = token.session
+        if session.revoked_at is not None or session.absolute_expires_at <= now:
+            raise invalid
+        if token.used_at is not None:
+            # Un token ya rotado solo es aceptable dentro de la ventana de gracia
+            # (reintento por respuesta perdida); fuera de ella se asume robo y se
+            # revoca la sesión completa.
+            grace = timedelta(seconds=get_settings().refresh_reuse_grace_seconds)
+            if now - token.used_at > grace:
+                await self.repository.revoke_session(session)
+                raise invalid
+        elif token.expires_at <= now:
+            raise invalid
         user = await self.repository.get_user_with_access(session.user_id)
         if user is None or not user.is_active:
-            raise AuthenticationError("The account is not active.")
-        await self.repository.revoke_session(session)
-        return await self._create_session_tokens(user)
+            raise invalid
+        token.used_at = now
+        return await self._rotate_session_tokens(user, session, now)
 
     async def logout(self, user: User, session_id: UUID) -> None:
         session = await self.repository.get_active_session(session_id, user.id)
         if session is not None:
             await self.repository.revoke_session(session)
+
+    async def logout_all(self, user: User) -> None:
+        await self.repository.revoke_all_sessions(user.id)
+        await self.repository.commit()
+
+    async def list_sessions(self, user: User, current_session_id: UUID) -> list[SessionRead]:
+        sessions = await self.repository.list_active_sessions(user.id)
+        return [
+            SessionRead(
+                id=session.id,
+                user_agent=session.user_agent,
+                ip_address=session.ip_address,
+                created_at=session.created_at,
+                last_used_at=session.last_used_at,
+                is_current=session.id == current_session_id,
+            )
+            for session in sessions
+        ]
+
+    async def revoke_session_by_id(self, user: User, session_id: UUID) -> None:
+        session = await self.repository.get_active_session(session_id, user.id)
+        if session is None:
+            raise NotFoundError("Session not found.")
+        await self.repository.revoke_session(session)
 
     async def authenticate_access_token(self, token: str) -> tuple[User, UUID]:
         user_id, session_id = decode_access_token(token)
@@ -108,10 +234,26 @@ class IdentityService:
     def current_user_view(self, user: User) -> CurrentUserRead:
         return CurrentUserRead(
             id=user.id,
+            username=user.username,
             email=user.email,
+            full_name=user.full_name,
             roles=sorted(assignment.role.code for assignment in user.role_assignments),
             permissions=sorted(self.effective_permissions(user)),
         )
+
+    async def list_users(self) -> list[UserSummaryRead]:
+        users = await self.repository.list_users()
+        return [
+            UserSummaryRead(
+                id=user.id,
+                username=user.username,
+                email=user.email,
+                full_name=user.full_name,
+                is_active=user.is_active,
+                roles=sorted(assignment.role.code for assignment in user.role_assignments),
+            )
+            for user in users
+        ]
 
     def ensure_permission(self, user: User, permission_code: str) -> None:
         if permission_code not in self.effective_permissions(user):
@@ -180,15 +322,44 @@ class IdentityService:
         ]
         await self.repository.replace_user_permissions(user, rows)
 
-    async def _create_session_tokens(self, user: User) -> TokenPair:
-        refresh_token, refresh_hash, expires_at = create_refresh_token()
+    async def _create_session_tokens(
+        self, user: User, user_agent: str | None, ip_address: str | None
+    ) -> TokenPair:
+        now = datetime.now(UTC)
+        settings = get_settings()
         session = AuthSession(
-            user_id=user.id, refresh_token_hash=refresh_hash, expires_at=expires_at
+            user_id=user.id,
+            user_agent=user_agent[:255] if user_agent else None,
+            ip_address=ip_address,
+            absolute_expires_at=now + timedelta(days=settings.session_absolute_days),
+            last_used_at=now,
         )
         self.repository.add(session)
+        await self.repository.flush()
+        return await self._issue_token_pair(user, session, now)
+
+    async def _rotate_session_tokens(
+        self, user: User, session: AuthSession, now: datetime
+    ) -> TokenPair:
+        session.last_used_at = now
+        return await self._issue_token_pair(user, session, now)
+
+    async def _issue_token_pair(
+        self, user: User, session: AuthSession, now: datetime
+    ) -> TokenPair:
+        settings = get_settings()
+        refresh_token, refresh_hash = create_refresh_token()
+        # El refresh se desliza, pero nunca más allá del vencimiento absoluto de la sesión.
+        expires_at = min(
+            now + timedelta(days=settings.refresh_token_days), session.absolute_expires_at
+        )
+        self.repository.add(
+            RefreshToken(session_id=session.id, token_hash=refresh_hash, expires_at=expires_at)
+        )
         await self.repository.commit()
-        await self.repository.refresh(session)
+        access_token, expires_in = create_access_token(user.id, session.id)
         return TokenPair(
-            access_token=create_access_token(user.id, session.id),
+            access_token=access_token,
             refresh_token=refresh_token,
+            expires_in=expires_in,
         )

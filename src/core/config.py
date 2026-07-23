@@ -15,8 +15,16 @@ class Settings(BaseSettings):
     database_url: PostgresDsn
     jwt_secret_key: SecretStr
     jwt_algorithm: str = "HS256"
+    jwt_issuer: str = "lavaliente-api"
+    jwt_audience: str = "lavaliente-app"
+    jwt_leeway_seconds: int = Field(default=10, ge=0, le=60)
     access_token_minutes: int = Field(default=15, gt=0, le=60)
     refresh_token_days: int = Field(default=7, gt=0, le=30)
+    session_absolute_days: int = Field(default=30, gt=0, le=90)
+    refresh_reuse_grace_seconds: int = Field(default=30, ge=0, le=120)
+    reset_code_minutes: int = Field(default=10, gt=0, le=60)
+    reset_code_max_attempts: int = Field(default=5, gt=0, le=10)
+    notifications_backend: str = "console"
     cors_origins: list[str] = []
 
     @property

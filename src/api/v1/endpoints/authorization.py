@@ -11,9 +11,39 @@ from src.modules.identity.schemas import (
     RoleRead,
     UserPermissionReplace,
     UserRoleReplace,
+    UserSummaryRead,
 )
 
 router = APIRouter(prefix="/authorization", tags=["Authorization"])
+
+
+@router.get(
+    "/permissions",
+    response_model=list[PermissionRead],
+    dependencies=[Depends(require_permission("authorization.permissions.manage"))],
+)
+async def list_permissions(service: IdentityServiceDependency) -> list[PermissionRead]:
+    permissions = await service.repository.list_permissions()
+    return [PermissionRead.model_validate(permission) for permission in permissions]
+
+
+@router.get(
+    "/roles",
+    response_model=list[RoleRead],
+    dependencies=[Depends(require_permission("authorization.roles.manage"))],
+)
+async def list_roles(service: IdentityServiceDependency) -> list[RoleRead]:
+    roles = await service.repository.list_roles()
+    return [RoleRead.model_validate(role) for role in roles]
+
+
+@router.get(
+    "/users",
+    response_model=list[UserSummaryRead],
+    dependencies=[Depends(require_permission("authorization.users.manage"))],
+)
+async def list_users(service: IdentityServiceDependency) -> list[UserSummaryRead]:
+    return await service.list_users()
 
 
 @router.post(
