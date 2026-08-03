@@ -410,6 +410,14 @@ Nota: la matriz deriva de los permisos RBAC (Planes 0001 §9 y 0005 §7); la UI 
 (excepto acciones contextuales donde el porqué importa, ej. "entregar con saldo": se
 muestra deshabilitada con explicación).
 
+Las columnas de esta matriz no se codifican como roles: la UI pregunta siempre por
+permisos. La columna "Admin" sale del **permiso comodín `*.*`** que llevan los roles
+`admin` y `system_admin` (implementado el 2026-08-02), y por eso un módulo nuevo aparece
+para ellos el día que se publica, sin tener que otorgar nada. Un `deny` por usuario le
+gana al comodín, y viaja al cliente en `denied_permissions` para que la app aplique la
+misma regla que la API: ocultar algo que el servidor permitiría es un fastidio, pero
+mostrar algo que va a rechazar con 403 es un error.
+
 ## 14. Estados transversales
 
 | Estado | Regla |
@@ -489,3 +497,5 @@ integrable y demostrable.
 | Fecha | Cambio |
 |---|---|
 | 2026-07-27 | Versión inicial: mapa de navegación de 5 tabs, especificación de pantallas de todos los módulos de la fase 1 (pedidos, clientes, caja, insumos, personal, catálogo, sync, ajustes), matriz pantalla × rol, estados transversales, inventario de componentes del design system y orden de implementación alineado a los PRs de backend. |
+| 2026-08-02 | §13 aclarada: la visibilidad por rol se resuelve con el permiso comodín `*.*` para `admin`/`system_admin` y con `denied_permissions` viajando al cliente, no con nombres de rol en la UI. El seeder pasó a sembrar también los permisos del Plan 0005 (`expenses`, `inventory`, `staff`, `attendance`, `daily_close`), sin los cuales la matriz no se podía expresar y un colaborador no veía ni Caja ni Insumos ni Personal. Guard del router extendido a `/inventory`, `/staff`, `/catalog`, `/promotions` y `/cash/history`: ocultar el destino no basta si un deep link entra igual. |
+| 2026-08-02 | **UI 2 implementada**: lista (§6.1), detalle (§6.2) y formulario en sheet (§6.3) de clientes, todo contra la BD local. Dos notas sobre lo que el plan pedía y no se pudo dar tal cual: los pedidos recientes y el saldo del §6.2 no tienen fuente hasta UI 4, así que esa sección va con estado vacío que lo dice en vez de quedar omitida; y **archivar dejó de ser un `update` con `is_active: false`**, porque el §13 lo reserva al admin y como update el servidor le habría exigido `customers.update`, que todo colaborador tiene — ahora viaja como operación `customer.archive` con su propio permiso. Del §15 se construyeron `AppSearchField` y `AppConfirmDialog`. |

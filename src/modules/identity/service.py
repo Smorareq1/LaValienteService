@@ -45,6 +45,12 @@ from src.modules.identity.schemas import (
     UserSummaryRead,
 )
 
+#: Permission code that stands for "everything". A role holding it passes every
+#: check, which is what keeps an administrator from silently losing access to a
+#: module the day it ships: new permissions do not have to be granted one by one.
+#: An explicit per-user `deny` still wins over it — see `has_permission`.
+WILDCARD_PERMISSION = "*.*"
+
 
 class IdentityService:
     """Use cases for login, password recovery, and dynamic role-based authorization."""
@@ -212,8 +218,8 @@ class IdentityService:
             raise AuthenticationError("Session is invalid or revoked.")
         return user, session_id
 
-    @staticmethod
-    def effective_permissions(user: User) -> set[str]:
+    @classmethod
+    def effective_permissions(cls, user: User) -> set[str]:
         role_permissions = {
             assignment.permission.code
             for user_role in user.role_assignments
@@ -224,14 +230,27 @@ class IdentityService:
             for assignment in user.permission_assignments
             if assignment.effect is PermissionEffect.GRANT
         }
-        denials = {
+        return (role_permissions | grants) - cls.denied_permissions(user)
+
+    @staticmethod
+    def denied_permissions(user: User) -> set[str]:
+        """Codes revoked from this user by hand, whatever their roles grant."""
+        return {
             assignment.permission.code
             for assignment in user.permission_assignments
             if assignment.effect is PermissionEffect.DENY
         }
-        return (role_permissions | grants) - denials
+
+    def has_permission(self, user: User, permission_code: str) -> bool:
+        if permission_code in self.denied_permissions(user):
+            return False
+        granted = self.effective_permissions(user)
+        return permission_code in granted or WILDCARD_PERMISSION in granted
 
     def current_user_view(self, user: User) -> CurrentUserRead:
+        # The app decides what to *show* with the same two lists the server uses
+        # to decide what to *allow*, so a section can never appear for someone the
+        # API would turn away.
         return CurrentUserRead(
             id=user.id,
             username=user.username,
@@ -239,6 +258,7 @@ class IdentityService:
             full_name=user.full_name,
             roles=sorted(assignment.role.code for assignment in user.role_assignments),
             permissions=sorted(self.effective_permissions(user)),
+            denied_permissions=sorted(self.denied_permissions(user)),
         )
 
     async def list_users(self) -> list[UserSummaryRead]:
@@ -256,7 +276,7 @@ class IdentityService:
         ]
 
     def ensure_permission(self, user: User, permission_code: str) -> None:
-        if permission_code not in self.effective_permissions(user):
+        if not self.has_permission(user, permission_code):
             raise AuthorizationError("The account lacks the required permission.")
 
     async def create_permission(self, data: PermissionCreate) -> Permission:

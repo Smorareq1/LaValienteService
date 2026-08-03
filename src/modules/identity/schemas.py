@@ -110,6 +110,9 @@ class CurrentUserRead(BaseModel):
     full_name: str | None
     roles: list[str]
     permissions: list[str]
+    #: Codes denied to this user by hand. They travel separately because a
+    #: wildcard grant would otherwise re-enable them on the client.
+    denied_permissions: list[str] = []
 
 
 class UserSummaryRead(BaseModel):
