@@ -1,22 +1,58 @@
 """Idempotency and conflict detection — the two promises of Plan 0004 §7.1."""
 
 import logging
-from datetime import UTC, date, datetime, timedelta
+from datetime import UTC, date, datetime, time, timedelta
 from decimal import Decimal
+from types import SimpleNamespace
 from typing import Any
 from uuid import UUID, uuid4
 
 import pytest
 
-from src.core.exceptions import ConflictError
+from src.core.exceptions import ConflictError, StaleVersionError
 from src.modules.customers.models import Customer
 from src.modules.customers.service import CustomersService
+from src.modules.expenses.models import Expense, ExpenseStatus
+from src.modules.inventory.allocation import InsufficientStock
+from src.modules.inventory.models import SupplySale
 from src.modules.orders.models import Order, OrderPayment, OrderStatus, PaymentMethod
 from src.modules.orders.schemas import OrderCancel, OrderDeliver, OrderPaymentPush
+from src.modules.staff.models import AttendanceRecord
 from src.modules.sync.models import OperationStatus, SyncDevice, SyncOperation
 from src.modules.sync.registry import FEED_ENTITIES_BY_NAME, OPERATION_PERMISSIONS
 from src.modules.sync.schemas import SyncOperationIn
 from src.modules.sync.service import SyncService
+
+
+def build_service(**services: Any) -> SyncService:
+    """A `SyncService` holding only the collaborators a test actually exercises.
+
+    Named rather than positional: every applicator test broke the day sync
+    learned about three more modules, and none of them cared.
+    """
+    slots: dict[str, Any] = dict.fromkeys(
+        ("repository", "customers", "orders", "identity", "staff", "expenses", "inventory")
+    )
+    return SyncService(**{**slots, **services})
+
+
+def incoming(
+    entity: str,
+    op_type: str,
+    payload: dict[str, Any],
+    entity_id: UUID,
+    *,
+    base_version: int | None = None,
+) -> SyncOperationIn:
+    return SyncOperationIn(
+        op_id=uuid4(),
+        seq=1,
+        entity=entity,
+        op_type=op_type,
+        entity_id=entity_id,
+        payload=payload,
+        base_version=base_version,
+    )
 
 
 def operation(status: OperationStatus, **kwargs: object) -> SyncOperation:
@@ -122,15 +158,17 @@ class TestRegistry:
         for entity, _ in OPERATION_PERMISSIONS:
             assert entity in FEED_ENTITIES_BY_NAME, entity
 
-    def test_an_order_has_no_generic_update(self) -> None:
-        """Plan 0001 §9: delivering, voiding and editing are three permissions.
+    def test_each_thing_that_happens_to_a_ticket_is_its_own_operation(self) -> None:
+        """Plan 0001 §9: correcting, delivering and voiding are three permissions.
 
-        A single `("order", "update")` would have let anyone who may edit a ticket
-        also hand it over.
+        `update` is the correction of §7.3 and nothing else. Folding delivery or
+        cancellation into it would have let anyone who may fix a typo on a ticket
+        also hand the clothes over.
         """
         order_ops = {op_type for entity, op_type in OPERATION_PERMISSIONS if entity == "order"}
 
-        assert order_ops == {"create", "status", "deliver", "cancel"}
+        assert order_ops == {"create", "update", "status", "deliver", "cancel"}
+        assert OPERATION_PERMISSIONS[("order", "update")] == "orders.update"
         assert OPERATION_PERMISSIONS[("order", "deliver")] == "orders.deliver"
         assert OPERATION_PERMISSIONS[("order", "cancel")] == "orders.cancel"
         assert OPERATION_PERMISSIONS[("order_payment", "create")] == "orders.collect_payment"
@@ -258,20 +296,9 @@ class TestOrderApplicator:
     @staticmethod
     def _service() -> tuple[SyncService, FakeOrdersService]:
         orders = FakeOrdersService()
-        return SyncService(None, None, orders, None), orders  # type: ignore[arg-type]
+        return build_service(orders=orders), orders
 
-    @staticmethod
-    def _incoming(
-        entity: str, op_type: str, payload: dict[str, Any], entity_id: UUID
-    ) -> SyncOperationIn:
-        return SyncOperationIn(
-            op_id=uuid4(),
-            seq=1,
-            entity=entity,
-            op_type=op_type,
-            entity_id=entity_id,
-            payload=payload,
-        )
+    _incoming = staticmethod(incoming)
 
     async def test_a_captured_ticket_keeps_the_id_the_device_minted(self) -> None:
         """A ticket printed offline has to name the same order the server stores."""
@@ -362,6 +389,410 @@ class TestOrderApplicator:
         assert version == 1
         assert data["id"] == str(payment_id)
         assert data["amount"] == "40.00"
+
+
+class TestTheDailyRegisterInTheFeed:
+    """Plan 0005 §6.4: which of the new tables travel, and in which direction."""
+
+    MIRRORED = (
+        "employee",
+        "work_shift",
+        "payroll_rate",
+        "attendance_record",
+        "expense_category",
+        "expense",
+        "product",
+        "product_lot",
+        "supply_sale",
+        "supply_sale_item",
+        "inventory_movement",
+        "daily_closure",
+    )
+
+    def test_every_table_of_the_daily_register_reaches_the_devices(self) -> None:
+        for entity in self.MIRRORED:
+            assert entity in FEED_ENTITIES_BY_NAME, entity
+
+    def test_only_three_of_them_come_back_up(self) -> None:
+        """The rest is administered online (D11), so a device mirrors and never writes."""
+        writable = {entity for entity, _ in OPERATION_PERMISSIONS}
+
+        assert writable & set(self.MIRRORED) == {"attendance_record", "expense", "supply_sale"}
+
+    def test_closing_a_day_is_never_pushed(self) -> None:
+        """D11: the acta travels down so devices learn the day is locked, and up
+        never — nobody closes a day without seeing the whole day first."""
+        assert "daily_closure" in FEED_ENTITIES_BY_NAME
+        assert not any(entity == "daily_closure" for entity, _ in OPERATION_PERMISSIONS)
+
+    def test_voiding_an_expense_is_not_a_device_operation(self) -> None:
+        """§6.4 gives a device `create` and `update`; §7 keeps `void` for the admin."""
+        expense_ops = {op_type for entity, op_type in OPERATION_PERMISSIONS if entity == "expense"}
+
+        assert expense_ops == {"create", "update"}
+
+    def test_what_a_bottle_cost_never_leaves_the_server(self) -> None:
+        """Nothing the app does offline needs the purchase price, and the counter
+        screen is the last place the margin should be readable."""
+        assert "sale_price" in FEED_ENTITIES_BY_NAME["product_lot"].fields
+        assert "unit_cost" not in FEED_ENTITIES_BY_NAME["product_lot"].fields
+
+    def test_the_suggested_overtime_is_not_in_the_feed(self) -> None:
+        """D8: only confirmed minutes are a decision, and only decisions travel."""
+        fields = FEED_ENTITIES_BY_NAME["attendance_record"].fields
+
+        assert "overtime_minutes" in fields
+        assert "suggested_overtime_minutes" not in fields
+
+    def test_an_expense_travels_with_its_money_and_its_links(self) -> None:
+        expense = Expense(
+            expense_date=date(2026, 7, 18),
+            category_id=uuid4(),
+            concept="Gas — 2 sacos",
+            amount=Decimal("161.00"),
+            method=PaymentMethod.CASH,
+            status=ExpenseStatus.PAID,
+            created_by_id=uuid4(),
+        )
+        expense.id = uuid4()
+        expense.version = 1
+
+        data = FEED_ENTITIES_BY_NAME["expense"].serialize(expense)
+
+        assert data["amount"] == "161.00"
+        assert data["method"] == "cash"
+        assert data["status"] == "paid"
+        assert data["expense_date"] == "2026-07-18"
+        # Absent links come across as null and not as missing keys: the device
+        # mirrors a fixed set of columns.
+        assert data["attendance_record_id"] is None
+
+    def test_a_working_day_travels_as_wall_clock_times(self) -> None:
+        record = AttendanceRecord(
+            employee_id=uuid4(),
+            work_date=date(2026, 7, 18),
+            clock_in=time(6, 50),
+            clock_out=time(13, 0),
+            overtime_minutes=60,
+        )
+        record.id = uuid4()
+        record.version = 2
+
+        data = FEED_ENTITIES_BY_NAME["attendance_record"].serialize(record)
+
+        assert data["clock_in"] == "06:50:00"
+        assert data["clock_out"] == "13:00:00"
+        assert data["overtime_minutes"] == 60
+
+
+class FakeStaffService:
+    """Records the calls and hands back a working day the feed can serialize."""
+
+    def __init__(self, *, fails_with: Exception | None = None) -> None:
+        self.calls: list[tuple[str, Any]] = []
+        self.fails_with = fails_with
+        self.record = AttendanceRecord(
+            employee_id=uuid4(),
+            work_date=date(2026, 7, 18),
+            clock_in=time(6, 50),
+            overtime_minutes=0,
+        )
+        self.record.id = uuid4()
+        self.record.version = 1
+
+    async def clock_in(self, data: Any) -> None:
+        if self.fails_with is not None:
+            raise self.fails_with
+        self.calls.append(("clock_in", data))
+        self.record.id = data.id
+
+    async def update_attendance(
+        self, record_id: UUID, data: Any, *, base_version: int | None = None
+    ) -> None:
+        if self.fails_with is not None:
+            raise self.fails_with
+        self.calls.append(("update", (record_id, data, base_version)))
+        self.record.version = 2
+
+    async def get_attendance(self, record_id: UUID) -> AttendanceRecord:
+        self.record.id = record_id
+        return self.record
+
+
+class FakeExpensesService:
+    def __init__(self, *, fails_with: Exception | None = None) -> None:
+        self.calls: list[tuple[str, Any]] = []
+        self.fails_with = fails_with
+        self.expense = Expense(
+            expense_date=date(2026, 7, 18),
+            category_id=uuid4(),
+            concept="Gas — 2 sacos",
+            amount=Decimal("161.00"),
+            method=PaymentMethod.CASH,
+            status=ExpenseStatus.PAID,
+            created_by_id=uuid4(),
+        )
+        self.expense.id = uuid4()
+        self.expense.version = 1
+
+    async def create_expense(self, data: Any, *, actor: Any) -> None:
+        if self.fails_with is not None:
+            raise self.fails_with
+        self.calls.append(("create", (data, actor)))
+
+    async def update_expense(
+        self, expense_id: UUID, data: Any, *, base_version: int | None = None
+    ) -> None:
+        if self.fails_with is not None:
+            raise self.fails_with
+        self.calls.append(("update", (expense_id, data, base_version)))
+
+    async def get_expense(self, expense_id: UUID) -> Expense:
+        self.expense.id = expense_id
+        return self.expense
+
+
+class FakeInventoryService:
+    def __init__(self, *, fails_with: Exception | None = None) -> None:
+        self.calls: list[tuple[str, Any]] = []
+        self.fails_with = fails_with
+        self.sale = SupplySale(
+            sale_date=date(2026, 7, 18),
+            method=PaymentMethod.CASH,
+            # What the shelf actually charges, which is not what the device sent.
+            total=Decimal("140.00"),
+            sold_by_id=uuid4(),
+        )
+        self.sale.id = uuid4()
+        self.sale.version = 1
+
+    async def create_sale(self, data: Any, *, actor: Any) -> SupplySale:
+        if self.fails_with is not None:
+            raise self.fails_with
+        self.calls.append(("create", (data, actor)))
+        self.sale.id = data.id
+        return self.sale
+
+    async def cancel_sale(self, sale_id: UUID, data: Any, *, actor: Any) -> SupplySale:
+        if self.fails_with is not None:
+            raise self.fails_with
+        self.calls.append(("cancel", (sale_id, data, actor)))
+        self.sale.id = sale_id
+        return self.sale
+
+
+class TestDailyRegisterApplicators:
+    """Plan 0004 D2 again: each op reaches the service the REST API would use.
+
+    The rules live with those services and are tested there; what is checked here
+    is the routing, the device-minted id and the version travelling through.
+    """
+
+    async def test_a_working_day_clocked_in_offline_keeps_its_id(self) -> None:
+        staff = FakeStaffService()
+        service = build_service(staff=staff)
+        offline_id = uuid4()
+
+        version, data, _ = await service._apply_attendance(
+            incoming(
+                "attendance_record",
+                "create",
+                {
+                    "employee_id": str(uuid4()),
+                    "work_date": "2026-07-18",
+                    "clock_in": "06:50:00",
+                },
+                offline_id,
+            )
+        )
+
+        assert staff.calls[0][0] == "clock_in"
+        assert staff.calls[0][1].id == offline_id
+        assert version == 1
+        assert data["id"] == str(offline_id)
+
+    async def test_clocking_out_declares_the_version_it_was_built_on(self) -> None:
+        """Two devices clocking the same person out is what `base_version` is for."""
+        staff = FakeStaffService()
+        service = build_service(staff=staff)
+        record_id = uuid4()
+
+        await service._apply_attendance(
+            incoming(
+                "attendance_record",
+                "update",
+                {"clock_out": "13:00:00", "overtime_minutes": 60},
+                record_id,
+                base_version=1,
+            )
+        )
+
+        _, (target, changes, base_version) = staff.calls[0]
+        assert target == record_id
+        assert changes.overtime_minutes == 60
+        assert base_version == 1
+
+    async def test_an_expense_captured_offline_keeps_its_id_and_its_author(self) -> None:
+        expenses = FakeExpensesService()
+        service = build_service(expenses=expenses)
+        actor = object()
+        offline_id = uuid4()
+
+        _, data, _ = await service._apply_expense(
+            actor,  # type: ignore[arg-type]
+            incoming(
+                "expense",
+                "create",
+                {
+                    "category_id": str(uuid4()),
+                    "concept": "Gas — 2 sacos",
+                    "amount": "161.00",
+                    "expense_date": "2026-07-18",
+                },
+                offline_id,
+            ),
+        )
+
+        _, (creation, captured_by) = expenses.calls[0]
+        assert creation.id == offline_id
+        # The operation runs as whoever captured it, not whoever is holding the
+        # device now (Plan 0004 §10).
+        assert captured_by is actor
+        assert data["amount"] == "161.00"
+
+    async def test_correcting_an_expense_declares_its_version(self) -> None:
+        expenses = FakeExpensesService()
+        service = build_service(expenses=expenses)
+        expense_id = uuid4()
+
+        await service._apply_expense(
+            None,  # type: ignore[arg-type]
+            incoming("expense", "update", {"amount": "170.00"}, expense_id, base_version=3),
+        )
+
+        _, (target, changes, base_version) = expenses.calls[0]
+        assert target == expense_id
+        assert changes.amount == Decimal("170.00")
+        assert base_version == 3
+
+    async def test_a_counter_sale_comes_back_with_the_servers_figures(self) -> None:
+        """D10 of Plan 0004: the price list may have moved while the device was away.
+
+        The device sends products and quantities and never a total, so what comes
+        back is what the shelf actually charged.
+        """
+        inventory = FakeInventoryService()
+        service = build_service(inventory=inventory)
+        offline_id = uuid4()
+
+        version, data, _ = await service._apply_supply_sale(
+            None,  # type: ignore[arg-type]
+            incoming(
+                "supply_sale",
+                "create",
+                {
+                    "sale_date": "2026-07-18",
+                    "lines": [{"product_id": str(uuid4()), "quantity": "2.00"}],
+                },
+                offline_id,
+            ),
+        )
+
+        assert inventory.calls[0][0] == "create"
+        assert inventory.calls[0][1][0].id == offline_id
+        assert version == 1
+        assert data["total"] == "140.00"
+
+    async def test_voiding_a_sale_carries_the_reason(self) -> None:
+        inventory = FakeInventoryService()
+        service = build_service(inventory=inventory)
+        sale_id = uuid4()
+
+        await service._apply_supply_sale(
+            None,  # type: ignore[arg-type]
+            incoming("supply_sale", "cancel", {"reason": "Cliente devolvió el bote"}, sale_id),
+        )
+
+        _, (target, cancellation, _) = inventory.calls[0]
+        assert target == sale_id
+        assert cancellation.reason == "Cliente devolvió el bote"
+
+
+class FakeSyncRepository:
+    def __init__(self) -> None:
+        self.written: list[SyncOperation] = []
+
+    async def get_operation(self, op_id: UUID) -> SyncOperation | None:
+        del op_id
+        return None
+
+    def add(self, instance: Any) -> None:
+        self.written.append(instance)
+
+    async def commit(self) -> None:
+        return None
+
+
+class FakeIdentityService:
+    def ensure_permission(self, user: Any, permission: str) -> None:
+        del user, permission
+
+
+class TestTheOutcomeOfARefusal:
+    """Plan 0004 §8 and Plan 0005 §6.4: what the device is told, and why it matters.
+
+    `conflict` and `rejected` land in the same review queue but are two different
+    screens. A conflict shows both versions and asks which to keep; there is
+    nothing to compare when the shelf is empty or the day is closed.
+    """
+
+    @staticmethod
+    async def _outcome(failure: Exception) -> Any:
+        service = build_service(
+            repository=FakeSyncRepository(),
+            identity=FakeIdentityService(),
+            staff=FakeStaffService(fails_with=failure),
+            inventory=FakeInventoryService(fails_with=failure),
+        )
+        device = SyncDevice(id=uuid4(), user_id=uuid4(), name="Tablet mostrador")
+        user = SimpleNamespace(id=uuid4())
+        entity, op_type, payload = (
+            ("supply_sale", "create", {"lines": [{"product_id": str(uuid4()), "quantity": "2"}]})
+            if isinstance(failure, InsufficientStock)
+            else ("attendance_record", "update", {"clock_out": "13:00:00"})
+        )
+        return await service._apply_one(
+            user,  # type: ignore[arg-type]
+            device,
+            incoming(entity, op_type, payload, uuid4(), base_version=1),
+        )
+
+    async def test_a_stale_version_is_the_only_conflict(self) -> None:
+        result = await self._outcome(StaleVersionError("That working day changed."))
+
+        assert result.status is OperationStatus.CONFLICT
+
+    async def test_a_closed_day_is_a_rejection_and_not_a_conflict(self) -> None:
+        """Nothing raced here: the day was shut on purpose, and the fix is to ask
+        an administrator to reopen it — not to choose between two versions."""
+        result = await self._outcome(ConflictError("Day 2026-07-18 is already closed."))
+
+        assert result.status is OperationStatus.REJECTED
+        assert "already closed" in (result.reason or "")
+
+    async def test_an_empty_shelf_rejects_with_the_shelf_attached(self) -> None:
+        """D12: the review queue has to show both sides, so the stock the server
+        sees now travels with the refusal instead of only inside its sentence."""
+        result = await self._outcome(
+            InsufficientStock("Suavizante", Decimal("5.00"), Decimal("2.00"))
+        )
+
+        assert result.status is OperationStatus.REJECTED
+        assert result.server_data == {
+            "product_name": "Suavizante",
+            "requested": "5.00",
+            "available": "2.00",
+        }
 
 
 class TestClockSkew:

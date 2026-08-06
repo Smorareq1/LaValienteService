@@ -10,3 +10,5 @@ dist/
 build/
 *.egg-info/
 .env
+# Uploaded product images (Plan 0005 D10): user data on disk, never in the repo.
+media/

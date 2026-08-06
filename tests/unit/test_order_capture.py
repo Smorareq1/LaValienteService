@@ -28,6 +28,7 @@ from src.modules.orders.schemas import (
     OrderPaymentCreate,
 )
 from src.modules.orders.service import DAILY_NUMBER_CONSTRAINT, OrdersService
+from src.modules.promotions.models import DiscountType, Promotion
 
 ORDER_DATE = date(2026, 7, 20)
 GARMENT_ID = uuid4()
@@ -77,6 +78,26 @@ class FakeCatalogRepository:
 
     async def list_garment_types(self, **_: object) -> list[FakeGarmentType]:
         return [FakeGarmentType(GARMENT_ID)]
+
+
+#: One live promotion, enough for the service to hand the engine a book.
+COURTESY = Promotion(
+    code="edredon_q5",
+    name="Q5 en edredones",
+    discount_type=DiscountType.FIXED_AMOUNT,
+    value=Decimal("5.00"),
+    applies_to_service_codes=None,
+    valid_from=date(2026, 1, 1),
+    valid_to=None,
+)
+COURTESY.id = uuid4()
+COURTESY.is_active = True
+COURTESY.deleted_at = None
+
+
+class FakePromotionsRepository:
+    async def list_all(self, **_: object) -> list[Promotion]:
+        return [COURTESY]
 
 
 class FakeCustomersService:
@@ -148,15 +169,32 @@ class FakeOrdersRepository:
         self.commits += 1
 
 
+class FakeClosedDays:
+    """The `ClosedDays` of `daily_close/lock.py`."""
+
+    def __init__(self, *days: date) -> None:
+        self.days = set(days)
+
+    async def is_closed(self, day: date) -> bool:
+        return day in self.days
+
+
 def build_service(
-    *, permissions: set[str] | None = None, collide_times: int = 0
+    *,
+    permissions: set[str] | None = None,
+    collide_times: int = 0,
+    closed_days: FakeClosedDays | None = None,
 ) -> tuple[OrdersService, FakeOrdersRepository]:
     repository = FakeOrdersRepository(collide_times=collide_times)
     service = OrdersService(
         repository,  # type: ignore[arg-type]
         FakeCatalogRepository(),  # type: ignore[arg-type]
+        FakePromotionsRepository(),  # type: ignore[arg-type]
         FakeCustomersService(),  # type: ignore[arg-type]
         FakeIdentityService(permissions or set()),  # type: ignore[arg-type]
+        # No `type: ignore` here, unlike the four above: `ClosedDays` is a
+        # Protocol, so the fake satisfies it by having the method.
+        closed_days,
     )
     return service, repository
 
@@ -303,6 +341,50 @@ class TestManualDiscount:
         assert order.discounts == []
 
 
+class TestPromotionDiscount:
+    async def test_a_promotion_is_ordinary_counter_work(self) -> None:
+        """Picking one was decided in advance; typing an amount was not (D10)."""
+        service, _ = build_service(permissions=set())
+
+        order, _ = await service.create(
+            a_ticket(discounts=[OrderDiscountCreate(promotion_code="edredon_q5")]),
+            actor=FakeUser(),  # type: ignore[arg-type]
+        )
+
+        assert order.discount_total == Decimal("5.00")
+        assert order.discounts[0].promotion_id == COURTESY.id
+        assert order.discounts[0].description == "Q5 en edredones"
+
+    async def test_a_promotion_alongside_a_manual_one_still_needs_the_permission(
+        self,
+    ) -> None:
+        """The check reads the list, not its first item."""
+        service, repository = build_service(permissions=set())
+
+        with pytest.raises(AuthorizationError):
+            await service.create(
+                a_ticket(
+                    discounts=[
+                        OrderDiscountCreate(promotion_code="edredon_q5"),
+                        OrderDiscountCreate(description="Cortesía", amount=Decimal(2)),
+                    ]
+                ),
+                actor=FakeUser(),  # type: ignore[arg-type]
+            )
+        assert repository.added == []
+
+    async def test_a_discount_cannot_be_both(self) -> None:
+        """The device never names an amount for a promotion (D5)."""
+        with pytest.raises(ValueError, match="works it out"):
+            OrderDiscountCreate(
+                promotion_code="edredon_q5", description="Cortesía", amount=Decimal(5)
+            )
+
+    async def test_a_discount_has_to_be_one_or_the_other(self) -> None:
+        with pytest.raises(ValueError, match="promotion_code"):
+            OrderDiscountCreate(description="Cortesía")
+
+
 class TestDailyNumberCollision:
     async def test_a_taken_number_is_retried_with_the_next_one(self) -> None:
         """D11: two devices reading the same `No.` in the same second."""
@@ -376,3 +458,22 @@ class TestCustomerOnTheFly:
 
         with pytest.raises(ValueError, match="not both and not neither"):
             OrderCreate(charges=[OrderChargeCreate(service_code="wash_tub", option_code="G")])
+
+
+class TestTheDateLock:
+    async def test_no_ticket_is_taken_on_a_day_already_closed(self) -> None:
+        """D9: once the day is filed, nothing new joins it — the acta already
+        said what the day was worth."""
+        service, repository = build_service(closed_days=FakeClosedDays(ORDER_DATE))
+
+        with pytest.raises(ConflictError, match="already closed"):
+            await service.create(a_ticket(), actor=FakeUser())  # type: ignore[arg-type]
+
+        assert repository.commits == 0
+
+    async def test_another_day_being_closed_changes_nothing(self) -> None:
+        service, _ = build_service(closed_days=FakeClosedDays(date(2026, 7, 19)))
+
+        order, _ = await service.create(a_ticket(), actor=FakeUser())  # type: ignore[arg-type]
+
+        assert order.order_date == ORDER_DATE

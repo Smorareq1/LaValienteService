@@ -5,8 +5,10 @@ from uuid import UUID
 from fastapi import APIRouter, Depends, Query, status
 
 from src.api.dependencies import CurrentUser, OrdersServiceDependency, require_permission
+from src.core.business_time import business_date
 from src.modules.orders.models import OrderStatus
 from src.modules.orders.schemas import (
+    DailySummary,
     OrderCancel,
     OrderCreate,
     OrderDeliver,
@@ -14,6 +16,7 @@ from src.modules.orders.schemas import (
     OrderPaymentCreate,
     OrderRead,
     OrderStatusChange,
+    OrderUpdate,
 )
 
 router = APIRouter(prefix="/orders", tags=["Orders"])
@@ -68,6 +71,23 @@ async def search_orders(
 
 
 @router.get(
+    "/daily-summary",
+    response_model=DailySummary,
+    dependencies=[Depends(require_permission("orders.read"))],
+)
+async def daily_summary(
+    service: OrdersServiceDependency,
+    order_date: Annotated[date | None, Query(alias="date")] = None,
+) -> DailySummary:
+    """The day's tickets counted and added up — the seed of the daily close.
+
+    Declared **before** `/{order_id}` on purpose: routes are matched in order,
+    and otherwise "daily-summary" would be read as an id and answered with a 422.
+    """
+    return await service.daily_summary(order_date or business_date())
+
+
+@router.get(
     "/{order_id}",
     response_model=OrderRead,
     dependencies=[Depends(require_permission("orders.read"))],
@@ -75,6 +95,28 @@ async def search_orders(
 async def get_order(order_id: UUID, service: OrdersServiceDependency) -> OrderRead:
     order = await service.get(order_id)
     return OrderRead.model_validate(order)
+
+
+@router.put(
+    "/{order_id}",
+    response_model=OrderRead,
+    dependencies=[Depends(require_permission("orders.update"))],
+)
+async def update_order(
+    order_id: UUID, data: OrderUpdate, service: OrdersServiceDependency, user: CurrentUser
+) -> OrderRead:
+    """Correct a ticket that is still in the shop (Plan 0001 §7.3).
+
+    Replaces and recalculates: the body is the boleta as it should read, priced
+    against the catalog of the order's own date. Editing one that is already
+    `ready` additionally demands `orders.update_ready`, and a delivered or voided
+    ticket is not editable at all — that one is corrected by voiding and taking
+    it again.
+    """
+    order, warnings = await service.update(order_id, data, actor=user)
+    read = OrderRead.model_validate(order)
+    read.warnings = warnings
+    return read
 
 
 @router.post(

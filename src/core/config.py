@@ -1,6 +1,7 @@
 from functools import lru_cache
+from pathlib import Path
 
-from pydantic import Field, PostgresDsn, SecretStr
+from pydantic import Field, PostgresDsn, SecretStr, field_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 
@@ -26,6 +27,30 @@ class Settings(BaseSettings):
     reset_code_max_attempts: int = Field(default=5, gt=0, le=10)
     notifications_backend: str = "console"
     cors_origins: list[str] = []
+
+    #: Where product images live (Plan 0005 §8.4, D10). Only the path reaches the
+    #: database; the bytes stay on disk today and can move to object storage
+    #: tomorrow without touching the schema.
+    media_dir: Path = Path("./media")
+    media_max_image_mb: int = Field(default=5, gt=0, le=50)
+    media_allowed_formats: list[str] = ["jpg", "jpeg", "png", "webp"]
+
+    @field_validator("media_allowed_formats", "cors_origins", mode="before")
+    @classmethod
+    def _split_csv(cls, value: object) -> object:
+        """Accept `jpg,png` from the environment, not only a JSON array.
+
+        `MEDIA_ALLOWED_FORMATS=jpg,jpeg,png,webp` is how §8.4 writes it and how
+        anyone would write it in a `.env`; without this, pydantic would demand
+        `["jpg", ...]` and fail the whole settings load over a comma.
+        """
+        if isinstance(value, str) and not value.strip().startswith("["):
+            return [item.strip() for item in value.split(",") if item.strip()]
+        return value
+
+    @property
+    def media_max_image_bytes(self) -> int:
+        return self.media_max_image_mb * 1024 * 1024
 
     @property
     def async_database_url(self) -> str:

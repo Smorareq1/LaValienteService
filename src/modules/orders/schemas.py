@@ -26,10 +26,34 @@ class OrderChargeCreate(BaseModel):
 
 
 class OrderDiscountCreate(BaseModel):
-    """A manual discount. Promotions arrive with PR 5 and carry their own code."""
+    """Money off: either a promotion, or an amount an administrator typed.
 
-    description: str = Field(min_length=2, max_length=160)
-    amount: Decimal = Field(gt=0, le=Decimal("99999999.99"))
+    A promotion sends only its code — the server works out how much it takes off,
+    the same way it does with prices (D5). A manual discount sends both, and
+    demands `orders.manual_discount`.
+    """
+
+    promotion_code: str | None = Field(default=None, min_length=1, max_length=50)
+    description: str | None = Field(default=None, min_length=2, max_length=160)
+    amount: Decimal | None = Field(default=None, gt=0, le=Decimal("99999999.99"))
+
+    @model_validator(mode="after")
+    def _is_one_or_the_other(self) -> "OrderDiscountCreate":
+        if self.promotion_code is not None:
+            if self.description is not None or self.amount is not None:
+                raise ValueError(
+                    "A promotion carries no amount of its own: the server works it out."
+                )
+            return self
+        if self.description is None or self.amount is None:
+            raise ValueError(
+                "Send a promotion_code, or a description and an amount for a manual discount."
+            )
+        return self
+
+    @property
+    def is_manual(self) -> bool:
+        return self.promotion_code is None
 
 
 class OrderPaymentCreate(BaseModel):
@@ -79,6 +103,36 @@ class OrderCreate(BaseModel):
         if (self.customer_id is None) == (self.customer is None):
             raise ValueError("Send either customer_id or customer, not both and not neither.")
         return self
+
+
+class OrderUpdate(BaseModel):
+    """Correct a ticket that is still in the shop (§7.3).
+
+    It **replaces**: what arrives is the ticket as it should read, and the server
+    recalculates it whole. Editing line by line would need ids the counter never
+    sees, and a boleta is corrected by rewriting it.
+
+    Three things are deliberately absent. The **date and the daily number**, which
+    belong to the day the ticket was taken and are what everyone calls it by.
+    The **status**, which has its own endpoints because each transition needs
+    data this body has no room for. And the **payments**: money received is an
+    event that happened, not a field — a payment is voided, never edited away.
+    """
+
+    booklet_serial: str | None = Field(default=None, max_length=20)
+    #: Omitted keeps the customer the ticket already has.
+    customer_id: UUID | None = None
+    nit: str | None = Field(default=None, pattern=NIT_PATTERN)
+    weight_lbs: Decimal | None = Field(default=None, gt=0, le=Decimal("9999.99"))
+    observations: str | None = Field(default=None, max_length=2000)
+    garments: list[OrderGarmentCreate] = Field(default_factory=list)
+    charges: list[OrderChargeCreate] = Field(min_length=1)
+    discounts: list[OrderDiscountCreate] = Field(default_factory=list)
+    #: The version the edit was built on (Plan 0004 D6). Over HTTP it is optional
+    #: — a screen that just read the ticket is editing what it saw — but a device
+    #: that was offline sends it, and a mismatch is a conflict rather than a
+    #: silent overwrite of whatever changed meanwhile.
+    base_version: int | None = Field(default=None, ge=1)
 
 
 class OrderStatusChange(BaseModel):
@@ -220,3 +274,30 @@ class OrderPage(BaseModel):
     total: int
     page: int
     page_size: int
+
+
+class DailySummary(BaseModel):
+    """The day's tickets added up (§8) — the seed of the daily close.
+
+    Everything here is scoped to the orders **of that business date**, payments
+    included. That is not the same question as "how much cash came in today":
+    money paid today against last week's ticket belongs to today's till and to
+    this date's `balance`, and reconciling the two is the daily close of the
+    Plan 0005, not this endpoint.
+    """
+
+    order_date: date
+    #: Every ticket of the day, voided ones included.
+    orders: int
+    by_status: dict[OrderStatus, int]
+    #: Pieces on the tickets that still count — a voided one took nothing in.
+    pieces: int
+    subtotal: Decimal
+    discount_total: Decimal
+    total: Decimal
+    #: Money received against the day's tickets, **voided ones included**: it was
+    #: handed over and it is in the drawer, and refunding it is a cash movement
+    #: of its own (§7.3).
+    collected: Decimal
+    #: What the day's live tickets still owe.
+    balance: Decimal

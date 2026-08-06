@@ -11,6 +11,7 @@ from sqlalchemy import (
     DateTime,
     Enum,
     ForeignKey,
+    Index,
     Integer,
     Numeric,
     String,
@@ -18,6 +19,7 @@ from sqlalchemy import (
     UniqueConstraint,
     Uuid,
     func,
+    text,
 )
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 
@@ -77,9 +79,10 @@ class ServiceOption(SyncableMixin, Base):
     __table_args__ = (UniqueConstraint("service_type_id", "code"),)
 
     id: Mapped[UUID] = mapped_column(Uuid, primary_key=True, default=uuid4)
-    service_type_id: Mapped[UUID] = mapped_column(
-        ForeignKey("service_types.id", ondelete="CASCADE"), index=True
-    )
+    # No index of its own: `uq_service_options_service_type_id` already starts
+    # with this column, so a second one could never be chosen and would still
+    # cost a write on every catalog change.
+    service_type_id: Mapped[UUID] = mapped_column(ForeignKey("service_types.id", ondelete="CASCADE"))
     code: Mapped[str] = mapped_column(String(20))
     name: Mapped[str] = mapped_column(String(120))
     #: Piece range that selects this option (hand-wash N2 = 1 to 4 pieces).
@@ -100,6 +103,20 @@ class ServicePrice(SyncableMixin, Base):
     """A price with a validity window. Prices are never edited, only superseded (D1)."""
 
     __tablename__ = "service_prices"
+    __table_args__ = (
+        # One price in force at a time per service and option (D1). It has been
+        # in the database since the first migration and only now in the model:
+        # an index the schema enforces and the model does not know about is a
+        # rule that disappears the day somebody rebuilds the schema from these
+        # classes.
+        Index(
+            "uq_service_prices_open_window",
+            "service_type_id",
+            "service_option_id",
+            unique=True,
+            postgresql_where=text("valid_to IS NULL AND deleted_at IS NULL"),
+        ),
+    )
 
     id: Mapped[UUID] = mapped_column(Uuid, primary_key=True, default=uuid4)
     service_type_id: Mapped[UUID] = mapped_column(

@@ -29,6 +29,7 @@ Después, siembra permisos y catálogo (ambos son idempotentes):
 ```bash
 poetry run python -m scripts.seed_permissions
 poetry run python -m scripts.seed_catalog
+poetry run python -m scripts.seed_promotions
 ```
 
 `seed_permissions` crea los roles `admin`, `collaborator` y `system_admin`, y otorga a los
@@ -62,6 +63,37 @@ es lógica pura: sus pruebas no abren una conexión.
 
 Un descuento sin promoción detrás exige `orders.manual_discount`, y el chequeo vive en el
 service porque la condición es el cuerpo del pedido, no la ruta.
+
+### Promociones: el pedido manda el código, no el monto
+
+Una promoción viaja en el pedido como `{"promotion_code": "domicilio_50"}` y **sin monto**:
+cuánto rebaja lo resuelve el servidor contra los cargos de esa boleta, igual que hace con los
+precios. Hay tres formas de rebajar (`percentage`, `fixed_amount`, `special_price`) y cada una
+puede apuntar a ciertos servicios (`applies_to_service_codes`) o al pedido entero.
+
+Elegir una promoción vigente **no exige permiso de descuento**: la decisión se tomó al crearla.
+Lo que exige `orders.manual_discount` es teclear un monto a mano. Una promoción que no está
+vigente el día del pedido, o que no rebaja nada en esa boleta, se **rechaza con un mensaje** en
+vez de aplicarse en silencio: dejarla caer callada le haría creer al mostrador que el cliente
+ya tiene su descuento. La descripción que queda en la línea es una copia congelada del nombre,
+así que renombrar la promoción mañana no reescribe los pedidos de ayer.
+
+### Corregir un pedido: se reemplaza, no se parcha
+
+`PUT /orders/{id}` recibe la boleta como debería leerse y la vuelve a calcular entera, contra
+el catálogo de **la fecha del pedido** y no la de hoy. No se editan tres cosas: la fecha y el
+correlativo, que son el nombre por el que todos llaman al pedido; el estado, que tiene sus
+propias puertas; y los pagos, porque el dinero recibido es un hecho que ocurrió.
+
+Quién puede corregir depende del estado (plan 0001 §7.3): `received` e `in_progress` los edita
+cualquiera que tome pedidos, uno `ready` exige `orders.update_ready` —ya está contado, lavado y
+doblado— y uno entregado o anulado no lo edita nadie: eso se corrige anulando y volviendo a
+capturar. Una edición que dejara el total por debajo de lo ya pagado se rechaza, porque eso es
+una devolución y las devoluciones son un movimiento de caja que este módulo no sabe registrar.
+
+`GET /orders/daily-summary?date=` cuenta y suma los pedidos de la fecha: cuántos hay por estado,
+piezas, subtotal, descuento, total, cobrado y saldo. Los anulados cuentan como pedido pero no
+como dinero — salvo lo que ya se les había cobrado, que sigue en el cajón.
 
 ### Ciclo de vida: cada cosa por su puerta
 

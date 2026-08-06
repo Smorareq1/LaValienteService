@@ -12,14 +12,17 @@ import pytest
 
 from src.core.business_time import GUATEMALA, business_date
 from src.core.exceptions import ConflictError
+from src.core.money import money
 from src.modules.catalog.models import PricingMode, ServiceOption, ServicePrice, ServiceType
 from src.modules.orders.pricing import (
     ChargeRequest,
-    DiscountRequest,
+    ManualDiscount,
     PriceBook,
-    money,
+    PromotionBook,
+    PromotionDiscount,
     price_order,
 )
+from src.modules.promotions.models import DiscountType, Promotion
 
 ORDER_DATE = date(2026, 7, 20)
 
@@ -98,6 +101,58 @@ def book(on_date: date = ORDER_DATE) -> PriceBook:
     return PriceBook(services, prices, on_date)
 
 
+def promotion(
+    code: str,
+    name: str,
+    discount_type: DiscountType,
+    value: str,
+    services: list[str] | None = None,
+    *,
+    valid_from: date = date(2026, 1, 1),
+    valid_to: date | None = None,
+    is_active: bool = True,
+) -> Promotion:
+    built = Promotion(
+        code=code,
+        name=name,
+        discount_type=discount_type,
+        value=Decimal(value),
+        applies_to_service_codes=services,
+        valid_from=valid_from,
+        valid_to=valid_to,
+    )
+    built.id = uuid4()
+    built.is_active = is_active
+    built.deleted_at = None
+    return built
+
+
+def promotions(on_date: date = ORDER_DATE) -> PromotionBook:
+    """The three promotions the seeder plants, as the engine sees them."""
+    return PromotionBook(
+        [
+            promotion(
+                "domicilio_50",
+                "50% en domicilio",
+                DiscountType.PERCENTAGE,
+                "50",
+                ["pickup", "delivery"],
+            ),
+            promotion("edredon_q5", "Q5 en edredones", DiscountType.FIXED_AMOUNT, "5.00"),
+            promotion(
+                "edredon_jul2026",
+                "Promo edredón julio 2026",
+                DiscountType.SPECIAL_PRICE,
+                "35.00",
+                ["wash_tub", "dry"],
+                valid_from=date(2026, 7, 15),
+                valid_to=date(2026, 7, 30),
+            ),
+        ],
+        on_date,
+    )
+
+
 class TestTheWorkedExample:
     """§6.4 — the ticket the plan does by hand, done by the engine."""
 
@@ -110,8 +165,9 @@ class TestTheWorkedExample:
                 ChargeRequest("extra_softener"),
                 ChargeRequest("delivery", amount=Decimal("15.00")),
             ],
-            [DiscountRequest("50% domicilio", Decimal("7.50"))],
+            [PromotionDiscount("domicilio_50")],
             book(),
+            promotions=promotions(),
             weight_lbs=Decimal("12.5"),
         )
 
@@ -137,13 +193,18 @@ class TestTheWorkedExample:
                 ChargeRequest("delivery", amount=Decimal("15.00")),
             ],
             [
-                DiscountRequest("50% domicilio", Decimal("7.50")),
-                DiscountRequest("Promo edredón julio", Decimal("25.00")),
+                PromotionDiscount("domicilio_50"),
+                PromotionDiscount("edredon_jul2026"),
             ],
             book(),
+            promotions=promotions(),
             weight_lbs=Decimal("12.5"),
         )
 
+        assert [line.amount for line in priced.discounts] == [
+            Decimal("7.50"),
+            Decimal("25.00"),
+        ]
         assert priced.total == Decimal("83.75")
 
 
@@ -245,14 +306,14 @@ class TestDiscounts:
         with pytest.raises(ConflictError, match="exceed the subtotal"):
             price_order(
                 [ChargeRequest("extra_softener")],
-                [DiscountRequest("De más", Decimal("11.00"))],
+                [ManualDiscount("De más", Decimal("11.00"))],
                 book(),
             )
 
     def test_a_discount_equal_to_the_subtotal_leaves_zero(self) -> None:
         priced = price_order(
             [ChargeRequest("extra_softener")],
-            [DiscountRequest("Cortesía", Decimal("10.00"))],
+            [ManualDiscount("Cortesía", Decimal("10.00"))],
             book(),
         )
 
@@ -262,8 +323,8 @@ class TestDiscounts:
         priced = price_order(
             [ChargeRequest("wash_tub", option_code="G")],
             [
-                DiscountRequest("Uno", Decimal("5.00")),
-                DiscountRequest("Otro", Decimal("2.50")),
+                ManualDiscount("Uno", Decimal("5.00")),
+                ManualDiscount("Otro", Decimal("2.50")),
             ],
             book(),
         )
@@ -272,14 +333,160 @@ class TestDiscounts:
         assert priced.total == Decimal("22.50")
 
     def test_a_manual_discount_carries_no_promotion(self) -> None:
-        """PR 5 fills this in; until then every discount is somebody's decision."""
+        """That null is what tells a manual discount from a promotion later."""
         priced = price_order(
             [ChargeRequest("wash_tub", option_code="G")],
-            [DiscountRequest("Cliente frecuente", Decimal("5.00"))],
+            [ManualDiscount("Cliente frecuente", Decimal("5.00"))],
             book(),
         )
 
         assert priced.discounts[0].promotion_id is None
+
+
+class TestPromotions:
+    """§5.4 — the three shapes a promotion can take."""
+
+    def test_a_percentage_bites_only_on_the_services_it_names(self) -> None:
+        """50% of the Q15 delivery, not 50% of the whole ticket."""
+        priced = price_order(
+            [
+                ChargeRequest("wash_tub", option_code="G"),
+                ChargeRequest("delivery", amount=Decimal("15.00")),
+            ],
+            [PromotionDiscount("domicilio_50")],
+            book(),
+            promotions=promotions(),
+        )
+
+        assert priced.subtotal == Decimal("45.00")
+        assert priced.discount_total == Decimal("7.50")
+
+    def test_a_fixed_amount_takes_the_same_off_any_ticket(self) -> None:
+        priced = price_order(
+            [ChargeRequest("wash_tub", option_code="G")],
+            [PromotionDiscount("edredon_q5")],
+            book(),
+            promotions=promotions(),
+        )
+
+        assert priced.discount_total == Decimal("5.00")
+
+    def test_a_special_price_is_the_difference_against_what_it_replaces(self) -> None:
+        """Tub Q30 + drying Q30 sold together for Q35 → Q25 off."""
+        priced = price_order(
+            [
+                ChargeRequest("wash_tub", option_code="G"),
+                ChargeRequest("dry", option_code="T60"),
+            ],
+            [PromotionDiscount("edredon_jul2026")],
+            book(),
+            promotions=promotions(),
+        )
+
+        assert priced.discount_total == Decimal("25.00")
+        assert priced.total == Decimal("35.00")
+
+    def test_a_special_price_above_the_ticket_is_worth_nothing(self) -> None:
+        """§5.4: never negative. Q35 against a Q25 tub is not Q10 owed back."""
+        with pytest.raises(ConflictError, match="takes nothing off"):
+            price_order(
+                [ChargeRequest("wash_tub", option_code="E")],
+                [PromotionDiscount("edredon_jul2026")],
+                book(),
+                promotions=promotions(),
+            )
+
+    def test_a_promotion_that_matches_no_line_is_refused_out_loud(self) -> None:
+        """Dropping it in silence would leave the counter sure it had applied."""
+        with pytest.raises(ConflictError, match="takes nothing off"):
+            price_order(
+                [ChargeRequest("wash_tub", option_code="G")],
+                [PromotionDiscount("domicilio_50")],
+                book(),
+                promotions=promotions(),
+            )
+
+    def test_the_snapshot_is_the_promotions_name_and_its_id(self) -> None:
+        """D2: renaming the promotion tomorrow must not rewrite this ticket."""
+        priced = price_order(
+            [ChargeRequest("wash_tub", option_code="G")],
+            [PromotionDiscount("edredon_q5")],
+            book(),
+            promotions=promotions(),
+        )
+
+        assert priced.discounts[0].description == "Q5 en edredones"
+        assert priced.discounts[0].promotion_id is not None
+
+    def test_an_expired_promotion_says_so(self) -> None:
+        """Plan 0004 §8: captured offline while it ran, applied after it ended."""
+        august = date(2026, 8, 4)
+        with pytest.raises(ConflictError, match="not in force"):
+            price_order(
+                [
+                    ChargeRequest("wash_tub", option_code="G"),
+                    ChargeRequest("dry", option_code="T60"),
+                ],
+                [PromotionDiscount("edredon_jul2026")],
+                book(august),
+                promotions=promotions(august),
+            )
+
+    def test_a_promotion_switched_off_is_not_in_force_either(self) -> None:
+        off = PromotionBook(
+            [
+                promotion(
+                    "cortesia",
+                    "Cortesía",
+                    DiscountType.FIXED_AMOUNT,
+                    "5.00",
+                    is_active=False,
+                )
+            ],
+            ORDER_DATE,
+        )
+
+        with pytest.raises(ConflictError, match="not in force"):
+            price_order(
+                [ChargeRequest("wash_tub", option_code="G")],
+                [PromotionDiscount("cortesia")],
+                book(),
+                promotions=off,
+            )
+
+    def test_an_unknown_code_is_refused(self) -> None:
+        with pytest.raises(ConflictError, match="no promotion with code"):
+            price_order(
+                [ChargeRequest("wash_tub", option_code="G")],
+                [PromotionDiscount("black_friday")],
+                book(),
+                promotions=promotions(),
+            )
+
+    def test_the_same_promotion_twice_is_a_slip(self) -> None:
+        with pytest.raises(ConflictError, match="already applied"):
+            price_order(
+                [ChargeRequest("wash_tub", option_code="G")],
+                [PromotionDiscount("edredon_q5"), PromotionDiscount("edredon_q5")],
+                book(),
+                promotions=promotions(),
+            )
+
+    def test_a_promotion_and_a_manual_discount_share_one_ticket(self) -> None:
+        priced = price_order(
+            [ChargeRequest("wash_tub", option_code="G")],
+            [
+                PromotionDiscount("edredon_q5"),
+                ManualDiscount("Cliente frecuente", Decimal("2.00")),
+            ],
+            book(),
+            promotions=promotions(),
+        )
+
+        assert priced.discount_total == Decimal("7.00")
+        assert priced.total == Decimal("23.00")
+        assert priced.discounts[0].promotion_id is not None
+        assert priced.discounts[1].promotion_id is None
 
 
 class TestWeight:

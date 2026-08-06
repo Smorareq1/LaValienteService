@@ -103,7 +103,9 @@ class Order(SyncableMixin, Base):
 
     id: Mapped[UUID] = mapped_column(Uuid, primary_key=True, default=uuid4)
     #: Business date (D8): what defines the correlative and the daily close.
-    order_date: Mapped[date] = mapped_column(Date, index=True)
+    #: Without an index of its own: `uq_orders_daily_number` starts with this
+    #: column, so every query that filters by date already has one.
+    order_date: Mapped[date] = mapped_column(Date)
     daily_number: Mapped[int] = mapped_column(Integer)
     #: Serial printed on the physical ticket by the print shop.
     booklet_serial: Mapped[str | None] = mapped_column(String(20), nullable=True)
@@ -124,7 +126,12 @@ class Order(SyncableMixin, Base):
     discount_total: Mapped[Decimal] = mapped_column(Numeric(10, 2))
     total: Mapped[Decimal] = mapped_column(Numeric(10, 2))
     received_by_id: Mapped[UUID] = mapped_column(ForeignKey("users.id"))
-    delivered_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    #: Indexed for the daily close, which counts the tickets handed back within
+    #: a business day (§5.4) — a range over this column and nothing else, so
+    #: without the index every preview scans the whole of `orders`, all day.
+    delivered_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True), nullable=True, index=True
+    )
     delivered_by_id: Mapped[UUID | None] = mapped_column(
         ForeignKey("users.id"), nullable=True
     )
@@ -171,8 +178,18 @@ class OrderGarment(SyncableMixin, Base):
 
     __tablename__ = "order_garments"
     __table_args__ = (
-        UniqueConstraint("order_id", "garment_type_id", name="uq_order_garments_type"),
         CheckConstraint("quantity > 0", name="ck_order_garments_quantity_positive"),
+        # Partial, so a correction can replace the line of a garment kind the
+        # ticket keeps: the old row stays as a tombstone until every device has
+        # seen it go, and two rows of "Camisa" are only a capture slip while
+        # both are live.
+        Index(
+            "uq_order_garments_type",
+            "order_id",
+            "garment_type_id",
+            unique=True,
+            postgresql_where=text("deleted_at IS NULL"),
+        ),
     )
 
     id: Mapped[UUID] = mapped_column(Uuid, primary_key=True, default=uuid4)
@@ -228,9 +245,9 @@ class OrderDiscount(SyncableMixin, Base):
         ForeignKey("orders.id", ondelete="CASCADE"), index=True
     )
     #: `None` means a manual discount, which demands `orders.manual_discount`.
-    #: Carries no foreign key yet: the `promotions` table arrives with PR 5, and
-    #: it adds the constraint over this column.
-    promotion_id: Mapped[UUID | None] = mapped_column(Uuid, nullable=True)
+    promotion_id: Mapped[UUID | None] = mapped_column(
+        ForeignKey("promotions.id"), nullable=True
+    )
     description: Mapped[str] = mapped_column(String(160))
     amount: Mapped[Decimal] = mapped_column(Numeric(10, 2))
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
@@ -262,7 +279,12 @@ class OrderPayment(SyncableMixin, Base):
     #: Transfer number, so a deposit can be found in the bank statement.
     reference: Mapped[str | None] = mapped_column(String(80), nullable=True)
     received_by_id: Mapped[UUID] = mapped_column(ForeignKey("users.id"))
-    paid_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
+    #: Indexed for the same reason: the drawer is counted by when the money was
+    #: handed over, not by the date of the ticket it settles (D1), so the close
+    #: cuts this column by range and joins back to the order afterwards.
+    paid_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), server_default=func.now(), index=True
+    )
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
 
     order: Mapped[Order] = relationship(back_populates="payments")

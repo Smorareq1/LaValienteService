@@ -14,29 +14,20 @@ from __future__ import annotations
 
 from dataclasses import dataclass, field
 from datetime import date
-from decimal import ROUND_HALF_UP, Decimal
+from decimal import Decimal
 from uuid import UUID
 
 from src.core.exceptions import ConflictError
+from src.core.money import money
 from src.modules.catalog.models import PricingMode, ServiceOption, ServicePrice, ServiceType
 from src.modules.catalog.service import resolve_price
+from src.modules.promotions.models import Promotion
 
 #: Weight-based washing: the one service whose quantity is also a header field.
 WASH_BY_WEIGHT_CODE = "wash_by_weight"
 #: Hand washing, priced by a piece-count level (N2/N3/N4).
 HAND_WASH_CODE = "hand_wash"
 
-CENTS = Decimal("0.01")
-
-
-def money(value: Decimal) -> Decimal:
-    """Round to cents, half away from zero — how a person rounds on paper.
-
-    Applied per line and then summed, rather than summing exact values and
-    rounding at the end, so the printed lines add up to the printed subtotal. A
-    customer checking the ticket by hand must not find it off by a cent.
-    """
-    return value.quantize(CENTS, rounding=ROUND_HALF_UP)
 
 
 @dataclass(frozen=True)
@@ -51,11 +42,31 @@ class ChargeRequest:
 
 
 @dataclass(frozen=True)
-class DiscountRequest:
-    """Money off. In PR 3 always manual; promotions join in PR 5."""
+class ManualDiscount:
+    """Money off with nothing but a person's judgement behind it (D10).
+
+    Demands `orders.manual_discount`, which only an administrator holds — the
+    amount is decided at the counter and nothing checks it afterwards.
+    """
 
     description: str
     amount: Decimal
+
+
+@dataclass(frozen=True)
+class PromotionDiscount:
+    """A promotion the counter picked. The engine works out how much it is.
+
+    Only the code travels, never an amount: a device that could name its own
+    figure would make D5 ("the client sends quantities, never money") true of
+    charges and false of discounts.
+    """
+
+    promotion_code: str
+
+
+#: What may appear on the discounts list of a capture.
+DiscountRequest = ManualDiscount | PromotionDiscount
 
 
 @dataclass(frozen=True)
@@ -128,6 +139,29 @@ class PriceBook:
         return resolved
 
 
+class PromotionBook:
+    """The promotions in force at one date, indexed by the code the app sends."""
+
+    def __init__(self, promotions: list[Promotion], on_date: date) -> None:
+        self.on_date = on_date
+        self._promotions = {promotion.code: promotion for promotion in promotions}
+
+    def resolve(self, code: str) -> Promotion:
+        promotion = self._promotions.get(code)
+        if promotion is None:
+            raise ConflictError(f"There is no promotion with code '{code}'.")
+        if not promotion.covers(self.on_date):
+            # Plan 0004 §8 files this under "promoción vencida al momento de
+            # aplicar": an order captured offline while the promotion was live
+            # can reach the server after it ended, and the person has to be told
+            # what the ticket costs without it rather than have it applied anyway.
+            raise ConflictError(
+                f"The promotion '{promotion.name}' is not in force "
+                f"on {self.on_date.isoformat()}."
+            )
+        return promotion
+
+
 def price_charge(request: ChargeRequest, book: PriceBook) -> PricedCharge:
     """Resolve one line against the catalog in force (§6.2 step 1)."""
     service = book.service(request.service_code)
@@ -184,6 +218,7 @@ def price_order(
     discounts: list[DiscountRequest],
     book: PriceBook,
     *,
+    promotions: PromotionBook | None = None,
     weight_lbs: Decimal | None = None,
     total_pieces: int = 0,
 ) -> PricedOrder:
@@ -201,13 +236,7 @@ def price_order(
 
     subtotal = money(sum((line.amount for line in priced), Decimal(0)))
 
-    priced_discounts = [
-        PricedDiscount(promotion_id=None, description=item.description, amount=money(item.amount))
-        for item in discounts
-    ]
-    for discount in priced_discounts:
-        if discount.amount <= 0:
-            raise ConflictError("A discount has to be greater than zero.")
+    priced_discounts = _price_discounts(discounts, charges, priced, promotions)
 
     discount_total = money(sum((item.amount for item in priced_discounts), Decimal(0)))
     if discount_total > subtotal:
@@ -222,6 +251,84 @@ def price_order(
         discount_total=discount_total,
         total=money(subtotal - discount_total),
         warnings=warnings,
+    )
+
+
+def _price_discounts(
+    discounts: list[DiscountRequest],
+    charges: list[ChargeRequest],
+    priced: list[PricedCharge],
+    promotions: PromotionBook | None,
+) -> list[PricedDiscount]:
+    """Resolve every discount to an amount (§6.2 step 3).
+
+    Promotions and manual amounts share one list so the ticket keeps them in the
+    order they were captured, which is the order the counter will read back.
+    """
+    resolved: list[PricedDiscount] = []
+    applied_codes: set[str] = set()
+
+    for item in discounts:
+        if isinstance(item, ManualDiscount):
+            amount = money(item.amount)
+            if amount <= 0:
+                raise ConflictError("A discount has to be greater than zero.")
+            resolved.append(
+                PricedDiscount(
+                    promotion_id=None, description=item.description, amount=amount
+                )
+            )
+            continue
+
+        if promotions is None:
+            raise ConflictError("This order was priced without the promotions of the day.")
+        if item.promotion_code in applied_codes:
+            # Twice is never intended: the second tap is a slip, and letting it
+            # through would take the discount off two times.
+            raise ConflictError(f"The promotion '{item.promotion_code}' is already applied.")
+        applied_codes.add(item.promotion_code)
+
+        promotion = promotions.resolve(item.promotion_code)
+        base = _applicable_base(promotion, charges, priced)
+        amount = money(promotion.discount_on(base))
+        if amount <= 0:
+            # Dropping it in silence would leave the counter certain a discount
+            # was applied, and the customer paying the full price anyway.
+            raise ConflictError(
+                f"The promotion '{promotion.name}' takes nothing off this order."
+            )
+        resolved.append(
+            PricedDiscount(
+                promotion_id=promotion.id,
+                # A snapshot, like a charge's description (D2): the promotion may
+                # be renamed or retired, and the ticket has to keep reading the
+                # way it did the day it was taken.
+                description=promotion.name[:160],
+                amount=amount,
+            )
+        )
+
+    return resolved
+
+
+def _applicable_base(
+    promotion: Promotion, charges: list[ChargeRequest], priced: list[PricedCharge]
+) -> Decimal:
+    """The lines the promotion bites on, added up (§5.4).
+
+    Read off the requests rather than the priced lines because the service code
+    is what the promotion names, and only the request carries it — the two lists
+    are the same lines in the same order.
+    """
+    return money(
+        sum(
+            (
+                line.amount
+                for request, line in zip(charges, priced, strict=True)
+                if promotion.applies_to(request.service_code)
+            ),
+            Decimal(0),
+        )
     )
 
 

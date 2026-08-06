@@ -10,7 +10,7 @@ Audit timestamps stay UTC, as everywhere else in the codebase.
 
 from __future__ import annotations
 
-from datetime import UTC, date, datetime, timedelta, timezone
+from datetime import UTC, date, datetime, time, timedelta, timezone
 
 #: Guatemala has been on UTC-6 all year round since 2006, so the business day is
 #: a fixed offset rather than a `ZoneInfo` lookup: the IANA database is not
@@ -22,3 +22,15 @@ GUATEMALA = timezone(timedelta(hours=-6), name="America/Guatemala")
 def business_date(moment: datetime | None = None) -> date:
     """The laundry's date at `moment` (default: now)."""
     return (moment or datetime.now(UTC)).astimezone(GUATEMALA).date()
+
+
+def business_day_bounds(day: date) -> tuple[datetime, datetime]:
+    """The UTC half-open interval `[start, end)` that a business day covers.
+
+    Rows whose only timestamp is an audit one — kardex movements, for instance —
+    still have to be listed "by day", and the day meant is the laundry's. Half
+    open rather than `<=` on the end, so a movement at exactly midnight belongs
+    to one day and not to both.
+    """
+    start = datetime.combine(day, time.min, tzinfo=GUATEMALA)
+    return start.astimezone(UTC), (start + timedelta(days=1)).astimezone(UTC)

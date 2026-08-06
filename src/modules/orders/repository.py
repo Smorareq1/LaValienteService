@@ -2,7 +2,9 @@ from __future__ import annotations
 
 from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
+from dataclasses import dataclass
 from datetime import date
+from decimal import Decimal
 from uuid import UUID
 
 from sqlalchemy import ColumnElement, Select, cast, func, or_, select
@@ -10,8 +12,29 @@ from sqlalchemy import String as SaString
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import selectinload
 
+from src.core.business_time import business_day_bounds
 from src.modules.customers.models import Customer
-from src.modules.orders.models import Order, OrderStatus
+from src.modules.orders.models import (
+    Order,
+    OrderCharge,
+    OrderDiscount,
+    OrderGarment,
+    OrderPayment,
+    OrderStatus,
+    PaymentMethod,
+)
+
+
+@dataclass(frozen=True)
+class DayStatusTotals:
+    """One status of one day, added up. Raw material for the daily summary."""
+
+    status: OrderStatus
+    orders: int
+    pieces: int
+    subtotal: Decimal
+    discount_total: Decimal
+    total: Decimal
 
 
 class OrdersRepository:
@@ -22,21 +45,34 @@ class OrdersRepository:
 
     @staticmethod
     def _with_lines() -> Select[tuple[Order]]:
-        """Load the four child collections up front.
+        """Load the four child collections up front, tombstones left out.
 
         A ticket is read as a whole — never a header without its lines — so the
         alternative is four lazy loads per row, which under an async session is
         not slow but fatal (`MissingGreenlet`).
+
+        The `deleted_at` filter is what makes a corrected ticket read as it now
+        stands: replacing a line marks the old one deleted rather than erasing
+        it, so that the change reaches the devices (Plan 0004 D8).
         """
         return select(Order).options(
-            selectinload(Order.garments),
-            selectinload(Order.charges),
-            selectinload(Order.discounts),
-            selectinload(Order.payments),
+            selectinload(Order.garments.and_(OrderGarment.deleted_at.is_(None))),
+            selectinload(Order.charges.and_(OrderCharge.deleted_at.is_(None))),
+            selectinload(Order.discounts.and_(OrderDiscount.deleted_at.is_(None))),
+            selectinload(Order.payments.and_(OrderPayment.deleted_at.is_(None))),
         )
 
-    async def get(self, order_id: UUID) -> Order | None:
+    async def get(self, order_id: UUID, *, refresh: bool = False) -> Order | None:
+        """The ticket with its lines.
+
+        `refresh` reloads the collections over what the session already holds,
+        which is how a ticket just corrected stops carrying the lines it had a
+        moment ago: they are still in memory, marked deleted, and only a
+        `populate_existing` read replaces them.
+        """
         statement = self._with_lines().where(Order.id == order_id, Order.deleted_at.is_(None))
+        if refresh:
+            statement = statement.execution_options(populate_existing=True)
         order: Order | None = await self.session.scalar(statement)
         return order
 
@@ -117,6 +153,93 @@ class OrdersRepository:
         items = list((await self.session.scalars(page_statement)).all())
         return items, total or 0
 
+    async def summarize_day(
+        self, order_date: date
+    ) -> tuple[list[DayStatusTotals], dict[OrderStatus, Decimal]]:
+        """The day's tickets added up by status, and what was paid against them.
+
+        Two aggregates rather than loading the orders: a busy Saturday is a few
+        dozen rows today, but a summary that reads every ticket to add four
+        columns is the kind of thing that stops working without warning.
+
+        Payments come back grouped by the ticket's status so the caller can tell
+        money collected on a voided ticket — which is in the drawer all the same
+        — from money that settles a live one.
+        """
+        rows = await self.session.execute(
+            select(
+                Order.status,
+                func.count(),
+                func.coalesce(func.sum(Order.total_pieces), 0),
+                func.coalesce(func.sum(Order.subtotal), Decimal("0.00")),
+                func.coalesce(func.sum(Order.discount_total), Decimal("0.00")),
+                func.coalesce(func.sum(Order.total), Decimal("0.00")),
+            )
+            .where(Order.order_date == order_date, Order.deleted_at.is_(None))
+            .group_by(Order.status)
+        )
+        totals = [
+            DayStatusTotals(
+                status=status,
+                orders=orders,
+                pieces=pieces,
+                subtotal=subtotal,
+                discount_total=discount_total,
+                total=total,
+            )
+            for status, orders, pieces, subtotal, discount_total, total in rows
+        ]
+
+        paid_rows = await self.session.execute(
+            select(Order.status, func.coalesce(func.sum(OrderPayment.amount), Decimal("0.00")))
+            .join(OrderPayment, OrderPayment.order_id == Order.id)
+            .where(
+                Order.order_date == order_date,
+                Order.deleted_at.is_(None),
+                OrderPayment.deleted_at.is_(None),
+            )
+            .group_by(Order.status)
+        )
+        return totals, {status: amount for status, amount in paid_rows}
+
+    async def collected_on(self, day: date) -> list[tuple[Decimal, PaymentMethod]]:
+        """Money received on a business date, whatever ticket it settles (D1).
+
+        Cut by `paid_at` and not by the ticket's date, which is the whole of D1:
+        an advance belongs to the day it was handed over and the balance to the
+        day it was collected. `paid_at` is an audit timestamp in UTC, so the day
+        is the laundry's — 19:00 in Cobán is already tomorrow in UTC.
+
+        Payments against voided tickets are included on purpose: that money is in
+        the drawer, and the count has to explain it.
+        """
+        start, end = business_day_bounds(day)
+        rows = await self.session.execute(
+            select(OrderPayment.amount, OrderPayment.method)
+            .join(Order, Order.id == OrderPayment.order_id)
+            .where(
+                OrderPayment.paid_at >= start,
+                OrderPayment.paid_at < end,
+                OrderPayment.deleted_at.is_(None),
+                Order.deleted_at.is_(None),
+            )
+        )
+        return [(amount, method) for amount, method in rows]
+
+    async def count_delivered_on(self, day: date) -> int:
+        """Tickets handed back on a business date (§5.4 `orders_delivered`)."""
+        start, end = business_day_bounds(day)
+        total = await self.session.scalar(
+            select(func.count())
+            .select_from(Order)
+            .where(
+                Order.delivered_at >= start,
+                Order.delivered_at < end,
+                Order.deleted_at.is_(None),
+            )
+        )
+        return total or 0
+
     def add(self, instance: object) -> None:
         self.session.add(instance)
 
@@ -134,6 +257,10 @@ class OrdersRepository:
         """
         async with self.session.begin_nested():
             yield
+
+    async def flush(self) -> None:
+        """Send what is pending to the database without ending the transaction."""
+        await self.session.flush()
 
     async def commit(self) -> None:
         await self.session.commit()

@@ -7,19 +7,32 @@ from uuid import UUID
 
 from pydantic import ValidationError
 
-from src.core.exceptions import AuthorizationError, ConflictError, DomainError, NotFoundError
+from src.core.exceptions import (
+    AuthorizationError,
+    DomainError,
+    NotFoundError,
+    StaleVersionError,
+)
 from src.modules.customers.schemas import CustomerCreate, CustomerUpdate
 from src.modules.customers.service import CustomersService
+from src.modules.expenses.schemas import ExpenseCreate, ExpenseUpdate
+from src.modules.expenses.service import ExpensesService
 from src.modules.identity.models import User
 from src.modules.identity.service import IdentityService
+from src.modules.inventory.allocation import InsufficientStock
+from src.modules.inventory.schemas import SupplySaleCancel, SupplySaleCreate
+from src.modules.inventory.service import InventoryService
 from src.modules.orders.schemas import (
     OrderCancel,
     OrderCreate,
     OrderDeliver,
     OrderPaymentPush,
     OrderStatusChange,
+    OrderUpdate,
 )
 from src.modules.orders.service import OrdersService
+from src.modules.staff.schemas import AttendanceCreate, AttendanceUpdate
+from src.modules.staff.service import StaffService
 from src.modules.sync.models import OperationStatus, SyncDevice, SyncOperation
 from src.modules.sync.registry import FEED_ENTITIES_BY_NAME, OPERATION_PERMISSIONS
 from src.modules.sync.repository import SyncRepository
@@ -55,11 +68,17 @@ class SyncService:
         customers: CustomersService,
         orders: OrdersService,
         identity: IdentityService,
+        staff: StaffService,
+        expenses: ExpensesService,
+        inventory: InventoryService,
     ) -> None:
         self.repository = repository
         self.customers = customers
         self.orders = orders
         self.identity = identity
+        self.staff = staff
+        self.expenses = expenses
+        self.inventory = inventory
 
     # -- devices ---------------------------------------------------------
 
@@ -149,9 +168,28 @@ class SyncService:
         try:
             self._authorize(user, operation)
             server_version, server_data, warnings = await self._dispatch(user, operation)
-        except ConflictError as error:
+        except StaleVersionError as error:
+            # The only outcome the plan calls a conflict (Plan 0004 §8): the row
+            # moved while the device was away, and the two versions have to be put
+            # side by side for a person to choose. Every other refusal below is a
+            # rule that said no, which is a different screen and a different fix.
             return await self._record(
                 device, user, operation, OperationStatus.CONFLICT, reason=str(error)
+            )
+        except InsufficientStock as error:
+            # D12: the counter has to see both sides, so the shelf as the server
+            # sees it now travels with the rejection instead of only in the text.
+            return await self._record(
+                device,
+                user,
+                operation,
+                OperationStatus.REJECTED,
+                reason=str(error),
+                server_data={
+                    "product_name": error.product_name,
+                    "requested": str(error.requested),
+                    "available": str(error.available),
+                },
             )
         except (DomainError, ValidationError, ValueError) as error:
             return await self._record(
@@ -225,6 +263,12 @@ class SyncService:
                 return await self._apply_customer(operation)
             case "order" | "order_payment":
                 return await self._apply_order(user, operation)
+            case "attendance_record":
+                return await self._apply_attendance(operation)
+            case "expense":
+                return await self._apply_expense(user, operation)
+            case "supply_sale":
+                return await self._apply_supply_sale(user, operation)
             case _:  # pragma: no cover — _authorize already rejected these
                 raise NotFoundError(f"Entity '{operation.entity}' is not supported.")
 
@@ -243,6 +287,15 @@ class SyncService:
                     {**operation.payload, "id": operation.entity_id}
                 )
                 order, warnings = await self.orders.create(creation, actor=user)
+                return order.version, self._serialize("order", order), warnings
+
+            case ("order", "update"):
+                changes = OrderUpdate.model_validate(
+                    {**operation.payload, "base_version": operation.base_version}
+                )
+                order, warnings = await self.orders.update(
+                    operation.entity_id, changes, actor=user
+                )
                 return order.version, self._serialize("order", order), warnings
 
             case ("order", "status"):
@@ -309,6 +362,97 @@ class SyncService:
                 raise NotFoundError(
                     f"Operation '{operation.op_type}' on '{operation.entity}' is not supported."
                 )
+
+    async def _apply_attendance(
+        self, operation: SyncOperationIn
+    ) -> tuple[int, dict[str, Any], list[str]]:
+        """Clocking in and out from a device (Plan 0005 §6.4).
+
+        The row is re-read after the write rather than serialized from what the
+        service returned: `AttendanceRead` carries the *suggested* overtime, and
+        the feed must never hand a device a number that looks like a decision
+        somebody made (D8).
+        """
+        match operation.op_type:
+            case "create":
+                creation = AttendanceCreate.model_validate(
+                    {**operation.payload, "id": operation.entity_id}
+                )
+                await self.staff.clock_in(creation)
+
+            case "update":
+                changes = AttendanceUpdate.model_validate(operation.payload)
+                await self.staff.update_attendance(
+                    operation.entity_id, changes, base_version=operation.base_version
+                )
+
+            case _:  # pragma: no cover — _authorize already rejected these
+                raise NotFoundError(
+                    f"Operation '{operation.op_type}' on 'attendance_record' is not supported."
+                )
+
+        record = await self.staff.get_attendance(operation.entity_id)
+        return record.version, self._serialize("attendance_record", record), []
+
+    async def _apply_expense(
+        self, user: User, operation: SyncOperationIn
+    ) -> tuple[int, dict[str, Any], list[str]]:
+        """An expense captured at the counter, with or without signal (§6.4).
+
+        A closed day refuses it here exactly as it would over HTTP: the guard is
+        in the domain service, so this transport gets it without asking.
+        """
+        match operation.op_type:
+            case "create":
+                creation = ExpenseCreate.model_validate(
+                    {**operation.payload, "id": operation.entity_id}
+                )
+                await self.expenses.create_expense(creation, actor=user)
+
+            case "update":
+                changes = ExpenseUpdate.model_validate(operation.payload)
+                await self.expenses.update_expense(
+                    operation.entity_id, changes, base_version=operation.base_version
+                )
+
+            case _:  # pragma: no cover — _authorize already rejected these
+                raise NotFoundError(
+                    f"Operation '{operation.op_type}' on 'expense' is not supported."
+                )
+
+        expense = await self.expenses.get_expense(operation.entity_id)
+        return expense.version, self._serialize("expense", expense), []
+
+    async def _apply_supply_sale(
+        self, user: User, operation: SyncOperationIn
+    ) -> tuple[int, dict[str, Any], list[str]]:
+        """A counter sale replayed against the shelf as it stands now.
+
+        The device sent products and quantities; which lots cover them and what
+        they cost is recomputed here (D10 of Plan 0004). A sale captured while
+        the price list moved comes back repriced in `server_data`, and one the
+        stock can no longer cover comes back rejected with the shelf attached
+        (D12) — see the handler in `_apply_one`.
+        """
+        match operation.op_type:
+            case "create":
+                creation = SupplySaleCreate.model_validate(
+                    {**operation.payload, "id": operation.entity_id}
+                )
+                sale = await self.inventory.create_sale(creation, actor=user)
+
+            case "cancel":
+                cancellation = SupplySaleCancel.model_validate(operation.payload)
+                sale = await self.inventory.cancel_sale(
+                    operation.entity_id, cancellation, actor=user
+                )
+
+            case _:  # pragma: no cover — _authorize already rejected these
+                raise NotFoundError(
+                    f"Operation '{operation.op_type}' on 'supply_sale' is not supported."
+                )
+
+        return sale.version, self._serialize("supply_sale", sale), []
 
     @staticmethod
     def _serialize(entity_name: str, row: object) -> dict[str, Any]:

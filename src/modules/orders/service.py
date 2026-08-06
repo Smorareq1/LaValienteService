@@ -1,14 +1,18 @@
 from __future__ import annotations
 
 from datetime import UTC, date, datetime
+from decimal import Decimal
 from uuid import UUID
 
 from sqlalchemy.exc import IntegrityError
 
 from src.core.business_time import business_date
-from src.core.exceptions import ConflictError, NotFoundError
+from src.core.exceptions import ConflictError, NotFoundError, StaleVersionError
+from src.core.mixins import SyncableMixin
 from src.modules.catalog.repository import CatalogRepository
 from src.modules.customers.service import CustomersService
+from src.modules.daily_close.lock import ClosedDays, ensure_open
+from src.modules.daily_close.totals import Split
 from src.modules.identity.models import User
 from src.modules.identity.service import IdentityService
 from src.modules.orders.models import (
@@ -24,19 +28,26 @@ from src.modules.orders.models import (
 from src.modules.orders.pricing import (
     ChargeRequest,
     DiscountRequest,
+    ManualDiscount,
     PriceBook,
     PricedOrder,
+    PromotionBook,
+    PromotionDiscount,
     price_order,
 )
 from src.modules.orders.repository import OrdersRepository
 from src.modules.orders.schemas import (
+    DailySummary,
     OrderCancel,
     OrderCreate,
     OrderDeliver,
+    OrderDiscountCreate,
     OrderPage,
     OrderPaymentCreate,
     OrderSummary,
+    OrderUpdate,
 )
+from src.modules.promotions.repository import PromotionsRepository
 
 #: Two devices taking a ticket in the same second both read the same `No.` and
 #: one of them loses the insert (D11). Three tries is far more than the volume
@@ -65,6 +76,18 @@ def _new_payment(
     return payment
 
 
+def _discount_request(line: OrderDiscountCreate) -> DiscountRequest:
+    """Turn a captured discount into what the engine takes.
+
+    The schema already guaranteed it is one shape or the other; this only picks
+    which.
+    """
+    if line.promotion_code is not None:
+        return PromotionDiscount(promotion_code=line.promotion_code)
+    assert line.description is not None and line.amount is not None
+    return ManualDiscount(description=line.description, amount=line.amount)
+
+
 def _violates(error: IntegrityError, constraint: str) -> bool:
     """Whether `error` is that constraint firing.
 
@@ -82,13 +105,19 @@ class OrdersService:
         self,
         repository: OrdersRepository,
         catalog: CatalogRepository,
+        promotions: PromotionsRepository,
         customers: CustomersService,
         identity: IdentityService,
+        closed_days: ClosedDays | None = None,
     ) -> None:
         self.repository = repository
         self.catalog = catalog
+        self.promotions = promotions
         self.customers = customers
         self.identity = identity
+        #: The date lock of D9. Optional so a unit test can build the service
+        #: without a close to consult; every wired path passes one.
+        self.closed_days = closed_days
 
     async def get(self, order_id: UUID) -> Order:
         order = await self.repository.get(order_id)
@@ -127,13 +156,16 @@ class OrdersService:
         Returns the order and the engine's warnings — things the counter should
         read but that must not stop a customer who is standing there waiting.
         """
-        if data.discounts:
-            # Checked here and not only at the endpoint because the condition is
-            # the payload, not the route: an order without discounts is ordinary
-            # counter work, one with them is an administrator's call.
+        if any(discount.is_manual for discount in data.discounts):
+            # Only the manual ones. Picking a promotion is ordinary counter work
+            # — the discount was decided in advance and the engine checks it is
+            # in force — while typing an amount is an administrator's call (D10).
+            # Checked here and not at the endpoint because the condition is the
+            # payload, not the route.
             self.identity.ensure_permission(actor, "orders.manual_discount")
 
         order_date = data.order_date or business_date()
+        await ensure_open(self.closed_days, order_date)
         if data.id is not None and await self.repository.get(data.id) is not None:
             raise ConflictError("An order with that id already exists.")
 
@@ -190,7 +222,7 @@ class OrdersService:
             raise ConflictError("That customer is archived and cannot take new orders.")
         return customer.id
 
-    async def _check_garments(self, data: OrderCreate) -> None:
+    async def _check_garments(self, data: OrderCreate | OrderUpdate) -> None:
         """Reject unknown or repeated garment kinds before touching the database.
 
         A foreign-key violation would say the same thing in a language nobody at
@@ -210,10 +242,20 @@ class OrdersService:
         if unknown:
             raise ConflictError(f"{len(unknown)} of the garment kinds do not exist.")
 
-    async def _price(self, data: OrderCreate, order_date: date, total_pieces: int) -> PricedOrder:
+    async def _price(
+        self, data: OrderCreate | OrderUpdate, order_date: date, total_pieces: int
+    ) -> PricedOrder:
         service_types = await self.catalog.list_service_types()
         prices = await self.catalog.list_prices_on(order_date)
         book = PriceBook(service_types, prices, order_date)
+        # Every promotion, live or not, resolved against the *order's* date and
+        # not today's: a ticket captured offline while a promotion was running
+        # can reach the server after it ended, and "esa promoción ya venció" is
+        # the answer the counter needs — not "no existe" (Plan 0004 §8). The
+        # table holds a handful of rows, so reading all of them costs nothing.
+        promotions = PromotionBook(
+            await self.promotions.list_all(include_inactive=True), order_date
+        )
 
         return price_order(
             [
@@ -225,11 +267,9 @@ class OrdersService:
                 )
                 for line in data.charges
             ],
-            [
-                DiscountRequest(description=line.description, amount=line.amount)
-                for line in data.discounts
-            ],
+            [_discount_request(line) for line in data.discounts],
             book,
+            promotions=promotions,
             weight_lbs=data.weight_lbs,
             total_pieces=total_pieces,
         )
@@ -302,6 +342,173 @@ class OrdersService:
         )
         return order
 
+    # -- editing a ticket that is still in the shop (§7.3) ------------------
+
+    async def update(
+        self, order_id: UUID, data: OrderUpdate, *, actor: User
+    ) -> tuple[Order, list[str]]:
+        """Rewrite a ticket and price it again from scratch.
+
+        The ticket is **replaced**, not patched: what arrives is how the boleta
+        should read, and the total is recomputed against the catalog of the
+        order's own date — not today's — so correcting a ticket from Monday does
+        not silently reprice it at Wednesday's rates (D1).
+        """
+        order = await self.get(order_id)
+        self._ensure_editable(order, actor=actor)
+        # Rewriting the ticket changes what its day recorded, so the lock is on
+        # the ticket's own date here (D9) — unlike delivering it, which is a
+        # thing that happens today.
+        await ensure_open(self.closed_days, order.order_date)
+
+        if data.base_version is not None and data.base_version != order.version:
+            # Plan 0004 D6: someone else changed this ticket while the device was
+            # away. Merging two versions of a boleta is guesswork; the operation
+            # goes to the review queue with both in hand.
+            raise StaleVersionError(
+                f"This order changed since you last saw it (version {order.version})."
+            )
+
+        if any(discount.is_manual for discount in data.discounts):
+            self.identity.ensure_permission(actor, "orders.manual_discount")
+
+        await self._check_garments(data)
+        customer_id = order.customer_id
+        if data.customer_id is not None and data.customer_id != order.customer_id:
+            customer = await self.customers.get(data.customer_id)
+            if not customer.is_active:
+                raise ConflictError("That customer is archived and cannot take new orders.")
+            customer_id = customer.id
+
+        total_pieces = sum(garment.quantity for garment in data.garments)
+        priced = await self._price(data, order.order_date, total_pieces)
+
+        if priced.total < order.paid_total:
+            # The ticket would end up costing less than has already been paid,
+            # which is a refund and not an edit — and refunds are a cash movement
+            # this module has no way to record (§7.3).
+            raise ConflictError(
+                f"The order already has {order.paid_total} paid, more than the new "
+                f"total of {priced.total}."
+            )
+
+        order.booklet_serial = data.booklet_serial
+        order.customer_id = customer_id
+        order.nit = data.nit
+        order.weight_lbs = data.weight_lbs
+        order.observations = data.observations
+        order.total_pieces = total_pieces
+        order.subtotal = priced.subtotal
+        order.discount_total = priced.discount_total
+        order.total = priced.total
+
+        # The old lines become tombstones instead of disappearing (D8): a device
+        # that already pulled them has to learn they are gone, and an erased row
+        # travels down no feed. They are marked and flushed *before* the new ones
+        # go in, so a ticket that keeps the same garment kind does not collide
+        # with the very row on its way out.
+        replaced = datetime.now(UTC)
+        old_lines: list[SyncableMixin] = [*order.charges, *order.discounts, *order.garments]
+        for line in old_lines:
+            line.deleted_at = replaced
+        await self.repository.flush()
+
+        order.charges.extend(
+            OrderCharge(
+                service_type_id=line.service_type_id,
+                service_option_id=line.service_option_id,
+                description=line.description,
+                quantity=line.quantity,
+                unit_price=line.unit_price,
+                amount=line.amount,
+            )
+            for line in priced.charges
+        )
+        order.discounts.extend(
+            OrderDiscount(
+                promotion_id=line.promotion_id,
+                description=line.description,
+                amount=line.amount,
+            )
+            for line in priced.discounts
+        )
+        order.garments.extend(
+            OrderGarment(
+                garment_type_id=line.garment_type_id,
+                quantity=line.quantity,
+                notes=line.notes,
+            )
+            for line in data.garments
+        )
+
+        try:
+            await self.repository.commit()
+        except IntegrityError as error:
+            if _violates(error, BOOKLET_CONSTRAINT):
+                raise ConflictError(
+                    f"Booklet {data.booklet_serial} has already been registered."
+                ) from error
+            raise
+
+        # Re-read so the answer carries the ticket as it now stands: the lines
+        # just tombstoned are still in the session's collections.
+        fresh = await self.repository.get(order_id, refresh=True)
+        return fresh or order, priced.warnings
+
+    def _ensure_editable(self, order: Order, *, actor: User) -> None:
+        """The table of §7.3, which is about *who* may edit *when*.
+
+        A ticket that is already `ready` has been counted, washed and folded;
+        rewriting what it says at that point is an administrator's call, and the
+        counter's way to fix one is to void it and take it again.
+        """
+        if order.status in (OrderStatus.DELIVERED, OrderStatus.CANCELLED):
+            raise ConflictError(
+                f"An order that is '{order.status}' can no longer be edited: "
+                "correcting one means voiding it and taking it again."
+            )
+        if order.status is OrderStatus.READY:
+            self.identity.ensure_permission(actor, "orders.update_ready")
+
+    # -- the day added up (§8) ---------------------------------------------
+
+    async def daily_summary(self, order_date: date) -> DailySummary:
+        """Count and add up the day's tickets — the seed of the daily close."""
+        totals, paid = await self.repository.summarize_day(order_date)
+
+        live = [row for row in totals if row.status is not OrderStatus.CANCELLED]
+        collected_on_live = sum(
+            (amount for status, amount in paid.items() if status is not OrderStatus.CANCELLED),
+            Decimal("0.00"),
+        )
+        total = sum((row.total for row in live), Decimal("0.00"))
+
+        return DailySummary(
+            order_date=order_date,
+            orders=sum(row.orders for row in totals),
+            by_status={row.status: row.orders for row in totals},
+            pieces=sum(row.pieces for row in live),
+            subtotal=sum((row.subtotal for row in live), Decimal("0.00")),
+            discount_total=sum((row.discount_total for row in live), Decimal("0.00")),
+            total=total,
+            collected=sum(paid.values(), Decimal("0.00")),
+            balance=total - collected_on_live,
+        )
+
+    # -- read by the daily close (PR 10) ------------------------------------
+
+    async def income_on(self, day: date) -> Split:
+        """What tickets brought in on a date, split cash vs. transfer (D1).
+
+        Here and not in `daily_close` because what counts as income against a
+        ticket is this module's rule: the day's money is what was *collected*,
+        not what was invoiced, and a ticket with an advance pays into two days.
+        """
+        return Split.of(await self.repository.collected_on(day))
+
+    async def orders_delivered_on(self, day: date) -> int:
+        return await self.repository.count_delivered_on(day)
+
     # -- life cycle (§7) ---------------------------------------------------
 
     async def change_status(
@@ -338,6 +545,11 @@ class OrdersService:
             raise ConflictError(
                 f"Only an order that is 'ready' can be delivered; this one is '{order.status}'."
             )
+        # Today's lock, not the ticket's: clothes taken on Monday are still handed
+        # back on Wednesday after Monday is closed. What this would change is
+        # *today's* count of deliveries and, if money changes hands, today's
+        # income — so today is the day that has to still be open.
+        await ensure_open(self.closed_days, business_date())
 
         self._reconcile_garments(order, data)
 
@@ -385,6 +597,8 @@ class OrdersService:
             raise ConflictError(
                 f"An order that is '{order.status}' can no longer be voided."
             )
+        # Voiding takes a ticket off its day's sheet, so that day has to be open.
+        await ensure_open(self.closed_days, order.order_date)
 
         # Money already taken is left alone. Refunding is a cash movement of its
         # own and the till has to show it; silently erasing the payment would
@@ -407,6 +621,10 @@ class OrdersService:
         order = await self.get(order_id)
         if order.status is OrderStatus.CANCELLED:
             raise ConflictError("A voided order takes no payments.")
+        # `paid_at` is now, so the money lands on today's sheet whatever the
+        # ticket's date: settling a Monday ticket on Wednesday is Wednesday's
+        # income (D1). Today is therefore the day that must still be open.
+        await ensure_open(self.closed_days, business_date())
 
         self._take_payment(order, data, actor=actor, is_advance=data.is_advance)
         await self.repository.commit()

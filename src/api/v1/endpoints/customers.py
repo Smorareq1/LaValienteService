@@ -3,7 +3,7 @@ from uuid import UUID
 
 from fastapi import APIRouter, Depends, Query, status
 
-from src.api.dependencies import CustomersServiceDependency, require_permission
+from src.api.dependencies import BaseVersion, CustomersServiceDependency, require_permission
 from src.modules.customers.schemas import (
     CustomerCreate,
     CustomerPage,
@@ -71,10 +71,7 @@ async def update_customer(
     customer_id: UUID,
     data: CustomerUpdate,
     service: CustomersServiceDependency,
-    base_version: Annotated[
-        int | None,
-        Query(ge=1, description="Version the edit was built on; omit to force the write."),
-    ] = None,
+    base_version: BaseVersion = None,
 ) -> CustomerRead:
     customer = await service.update(customer_id, data, base_version=base_version)
     return CustomerRead.model_validate(customer)

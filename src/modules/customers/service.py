@@ -3,7 +3,7 @@ from __future__ import annotations
 from datetime import UTC, datetime
 from uuid import UUID
 
-from src.core.exceptions import ConflictError, NotFoundError
+from src.core.exceptions import ConflictError, NotFoundError, StaleVersionError
 from src.modules.customers.models import Customer
 from src.modules.customers.repository import CustomersRepository
 from src.modules.customers.schemas import (
@@ -117,7 +117,7 @@ class CustomersService:
         if base_version is None:
             return
         if customer.version != base_version:
-            raise ConflictError(
+            raise StaleVersionError(
                 f"The customer changed since version {base_version} "
                 f"(current version is {customer.version})."
             )

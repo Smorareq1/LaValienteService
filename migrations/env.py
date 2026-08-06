@@ -14,8 +14,13 @@ from src.core.database import Base
 # identity".
 from src.modules.catalog import models as catalog_models  # noqa: F401
 from src.modules.customers import models as customers_models  # noqa: F401
+from src.modules.daily_close import models as daily_close_models  # noqa: F401
+from src.modules.expenses import models as expenses_models  # noqa: F401
 from src.modules.identity import models as identity_models  # noqa: F401
+from src.modules.inventory import models as inventory_models  # noqa: F401
 from src.modules.orders import models as orders_models  # noqa: F401
+from src.modules.promotions import models as promotions_models  # noqa: F401
+from src.modules.staff import models as staff_models  # noqa: F401
 from src.modules.sync import models as sync_models  # noqa: F401
 
 config = context.config

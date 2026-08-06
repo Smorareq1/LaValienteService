@@ -6,11 +6,13 @@ all the clothes go back, and who is allowed to hand them over with money still
 owed.
 """
 
+from datetime import date, timedelta
 from decimal import Decimal
 from uuid import UUID, uuid4
 
 import pytest
 
+from src.core.business_time import business_date
 from src.core.exceptions import AuthorizationError, ConflictError
 from src.modules.identity.models import User
 from src.modules.orders.models import (
@@ -95,15 +97,32 @@ def an_order(
     return order
 
 
+class FakeClosedDays:
+    """The `ClosedDays` of `daily_close/lock.py` — the one question the lock asks."""
+
+    def __init__(self, *days: date) -> None:
+        self.days = set(days)
+
+    async def is_closed(self, day: date) -> bool:
+        return day in self.days
+
+
 def build_service(
-    order: Order, *, permissions: set[str] | None = None
+    order: Order,
+    *,
+    permissions: set[str] | None = None,
+    closed_days: FakeClosedDays | None = None,
 ) -> tuple[OrdersService, FakeOrdersRepository]:
     repository = FakeOrdersRepository(order)
     service = OrdersService(
         repository,  # type: ignore[arg-type]
         None,  # type: ignore[arg-type]
         None,  # type: ignore[arg-type]
+        None,  # type: ignore[arg-type]
         FakeIdentityService(permissions or set()),  # type: ignore[arg-type]
+        # No `type: ignore` here, unlike the four above: `ClosedDays` is a
+        # Protocol, so the fake satisfies it by having the method.
+        closed_days,
     )
     return service, repository
 
@@ -378,3 +397,62 @@ class TestPayments:
             )
 
         assert order.balance == Decimal("60.00")
+
+
+class TestTheDateLock:
+    """D9: a closed day stops moving. What matters is *which* day (see
+    `daily_close/lock.py`): the date of the event being written, not the age of
+    the paper it is written on."""
+
+    async def test_no_money_is_taken_on_a_day_already_closed(self) -> None:
+        """`paid_at` is now, so a payment always lands on today's sheet."""
+        order = an_order()
+        service, _ = build_service(order, closed_days=FakeClosedDays(business_date()))
+
+        with pytest.raises(ConflictError, match="already closed"):
+            await service.add_payment(
+                order.id, OrderPaymentCreate(amount=Decimal("10.00")), actor=an_actor()
+            )
+
+    async def test_nothing_is_handed_back_on_a_day_already_closed(self) -> None:
+        order = an_order(paid=Decimal("100.00"))
+        service, _ = build_service(order, closed_days=FakeClosedDays(business_date()))
+
+        with pytest.raises(ConflictError, match="already closed"):
+            await service.deliver(order.id, OrderDeliver(), actor=an_actor())
+
+    async def test_a_ticket_from_a_closed_day_is_still_delivered(self) -> None:
+        """The rule that matters most. Clothes taken on Monday are picked up on
+        Wednesday, and Monday having been closed cannot hold them hostage — the
+        delivery is Wednesday's event."""
+        order = an_order(paid=Decimal("100.00"))
+        order.order_date = business_date() - timedelta(days=2)
+        service, repository = build_service(
+            order, closed_days=FakeClosedDays(order.order_date)
+        )
+
+        await service.deliver(order.id, OrderDeliver(), actor=an_actor())
+
+        assert order.status is OrderStatus.DELIVERED
+        assert repository.commits == 1
+
+    async def test_a_ticket_is_not_voided_off_a_closed_day(self) -> None:
+        """Voiding takes it off that day's sheet, so that day has to be open."""
+        order = an_order(status=OrderStatus.RECEIVED)
+        order.order_date = business_date() - timedelta(days=2)
+        service, _ = build_service(order, closed_days=FakeClosedDays(order.order_date))
+
+        with pytest.raises(ConflictError, match="already closed"):
+            await service.cancel(order.id, OrderCancel(reason="Ya no"), actor=an_actor())
+
+    async def test_an_open_day_lets_everything_through(self) -> None:
+        order = an_order()
+        service, _ = build_service(
+            order, closed_days=FakeClosedDays(business_date() - timedelta(days=1))
+        )
+
+        await service.add_payment(
+            order.id, OrderPaymentCreate(amount=Decimal("10.00")), actor=an_actor()
+        )
+
+        assert order.paid_total == Decimal("10.00")
