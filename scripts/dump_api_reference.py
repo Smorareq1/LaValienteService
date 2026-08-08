@@ -42,9 +42,7 @@ def _permission(route: APIRoute) -> str:
     for dependant in _walk(route.dependant):
         if dependant.call is not None and dependant.call in PERMISSION_BY_DEPENDENCY:
             return f"`{PERMISSION_BY_DEPENDENCY[dependant.call]}`"
-    authenticated = any(
-        dependant.call is get_current_user for dependant in _walk(route.dependant)
-    )
+    authenticated = any(dependant.call is get_current_user for dependant in _walk(route.dependant))
     return SESSION if authenticated else PUBLIC
 
 

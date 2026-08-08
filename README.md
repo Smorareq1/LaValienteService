@@ -2,6 +2,10 @@
 
 Backend de La Valiente, construido con FastAPI, PostgreSQL, SQLAlchemy async y Alembic.
 
+Documentación: [API v1](docs/API.md) · [Arquitectura](docs/ARCHITECTURE.md) ·
+[Identidad y acceso](docs/IDENTITY_AND_ACCESS.md) · [Planes](docs/plans/README.md).
+Con el servidor corriendo, el detalle por ruta está en `/docs`.
+
 ## Desarrollo
 
 La configuración se recibe exclusivamente mediante variables de entorno; no se versionan archivos
@@ -24,13 +28,22 @@ El comando de desarrollo usa el CLI de FastAPI, no Uvicorn directamente.
 poetry run alembic upgrade head
 ```
 
-Después, siembra permisos y catálogo (ambos son idempotentes):
+Después, siembra los datos de arranque. Todos los seeders son idempotentes, así que
+volver a correrlos no duplica nada:
 
 ```bash
 poetry run python -m scripts.seed_permissions
 poetry run python -m scripts.seed_catalog
 poetry run python -m scripts.seed_promotions
+poetry run python -m scripts.seed_staff
+poetry run python -m scripts.seed_expense_categories
+poetry run python -m scripts.seed_products
 ```
+
+Los tres últimos son los del registro diario: turnos y tarifa de hora extra,
+categorías de gasto y los insumos que se venden en el mostrador. Sin ellos la
+pantalla de asistencia no tiene turnos que ofrecer y un gasto no tiene dónde
+clasificarse.
 
 `seed_permissions` crea los roles `admin`, `collaborator` y `system_admin`, y otorga a los
 dos administrativos el **permiso comodín `*.*`**: pasan cualquier chequeo, de modo que un

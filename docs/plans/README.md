@@ -39,9 +39,9 @@ docs/plans/
 | [0001](0001-pedidos-diarios/PLAN.md) | Pedidos diarios (toma de pedido) | 🚧 En progreso | `customers`, `catalog`, `orders`, `promotions` | 2026-08-02 |
 | [0002](0002-ui-toma-pedido/PLAN.md) | UI de toma de pedido (campos de captura) | 🚧 En progreso | APP Flutter | 2026-08-03 |
 | [0003](0003-escaneo-boleta-ia/PLAN.md) | Escaneo de boleta con IA (⚠️ temporal) | 📝 Borrador | `intake_scan`, APP Flutter | 2026-07-22 |
-| [0004](0004-sincronizacion-offline/PLAN.md) | Offline-first y sincronización (fundacional — precede a 0001) | 🚧 En progreso | `sync`, APP Flutter | 2026-08-03 |
-| [0005](0005-registro-diario-cierre/PLAN.md) | Registro diario: personal, inventario, gastos y cierre (+ orden consolidado de migraciones de la fase 1) | 📝 Borrador | `staff`, `inventory`, `expenses`, `daily_close` | 2026-07-27 |
-| [0006](0006-ui-app-fase1/PLAN.md) | PRD de UI: módulos y pantallas de la app (fase 1) | 🚧 En progreso | APP Flutter, `design_system` | 2026-08-03 |
+| [0004](0004-sincronizacion-offline/PLAN.md) | Offline-first y sincronización (fundacional — precede a 0001) | 🚧 En progreso | `sync`, APP Flutter | 2026-08-05 |
+| [0005](0005-registro-diario-cierre/PLAN.md) | Registro diario: personal, inventario, gastos y cierre (+ orden consolidado de migraciones de la fase 1) | ✔️ Implementado | `staff`, `inventory`, `expenses`, `daily_close` | 2026-08-05 |
+| [0006](0006-ui-app-fase1/PLAN.md) | PRD de UI: módulos y pantallas de la app (fase 1) | 🚧 En progreso | APP Flutter, `design_system` | 2026-08-07 |
 
 ### Planes previstos (aún sin documento)
 

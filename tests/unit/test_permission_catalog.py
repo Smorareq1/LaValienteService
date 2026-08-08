@@ -55,9 +55,7 @@ class TestTheCatalogCoversTheCode:
 
     def test_every_permission_the_source_checks_is_catalogued(self) -> None:
         missing = sorted(checked_codes() - CODES)
-        assert not missing, (
-            f"checked but never seeded, so only the wildcard passes them: {missing}"
-        )
+        assert not missing, f"checked but never seeded, so only the wildcard passes them: {missing}"
 
     def test_every_operation_a_device_may_push_is_catalogued(self) -> None:
         ensure_catalogued(*OPERATION_PERMISSIONS.values())

@@ -89,7 +89,9 @@ class Permission(Base):
     # Named by hand: the convention would call a two-column constraint after the
     # first column alone (`uq_permissions_resource`), which reads like a promise
     # the table does not make.
-    __table_args__ = (UniqueConstraint("resource", "action", name="uq_permissions_resource_action"),)
+    __table_args__ = (
+        UniqueConstraint("resource", "action", name="uq_permissions_resource_action"),
+    )
 
     id: Mapped[UUID] = mapped_column(Uuid, primary_key=True, default=uuid4)
     resource: Mapped[str] = mapped_column(String(100))

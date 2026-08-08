@@ -82,7 +82,9 @@ class ServiceOption(SyncableMixin, Base):
     # No index of its own: `uq_service_options_service_type_id` already starts
     # with this column, so a second one could never be chosen and would still
     # cost a write on every catalog change.
-    service_type_id: Mapped[UUID] = mapped_column(ForeignKey("service_types.id", ondelete="CASCADE"))
+    service_type_id: Mapped[UUID] = mapped_column(
+        ForeignKey("service_types.id", ondelete="CASCADE")
+    )
     code: Mapped[str] = mapped_column(String(20))
     name: Mapped[str] = mapped_column(String(120))
     #: Piece range that selects this option (hand-wash N2 = 1 to 4 pieces).

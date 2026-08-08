@@ -62,9 +62,7 @@ CATALOG: tuple[PermissionSpec, ...] = (
     PermissionSpec(
         "orders", "manual_discount", "Apply a discount with no promotion behind it", False
     ),
-    PermissionSpec(
-        "orders", "deliver_unpaid", "Deliver an order that still owes money", False
-    ),
+    PermissionSpec("orders", "deliver_unpaid", "Deliver an order that still owes money", False),
     PermissionSpec("promotions", "read", "See the promotions in force", True),
     PermissionSpec("promotions", "manage", "Administer promotions", False),
     # Plan 0005 §7.
@@ -95,9 +93,7 @@ CATALOG: tuple[PermissionSpec, ...] = (
     PermissionSpec("staff", "manage", "Administer employees, shifts and rates", False),
     # Not in the plans' tables: device revocation (Plan 0004 D11) needs a
     # permission of its own and it is squarely an administrator's call.
-    PermissionSpec(
-        "sync.devices", "manage", "List and revoke synchronization devices", False
-    ),
+    PermissionSpec("sync.devices", "manage", "List and revoke synchronization devices", False),
     PermissionSpec("authorization.permissions", "manage", "Create dynamic permissions", False),
     PermissionSpec(
         "authorization.roles", "manage", "Create roles and assign their permissions", False
