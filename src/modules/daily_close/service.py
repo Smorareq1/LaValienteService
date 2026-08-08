@@ -83,6 +83,13 @@ class DailyCloseService:
         The counter is standing at the end of a shift with the drawer open. A
         close that refused over an undelivered ticket would simply be worked
         around; one that says so out loud gets the ticket looked at.
+
+        They travel as `code` or `code:value`, the same shape the sync engine
+        already uses for `possible_duplicate_of:<id>`, and not as English prose:
+        the only client is a Spanish app, and a sentence written here is a
+        sentence it cannot show. What the server owns is *which* warnings the day
+        has and the figures behind them — it counts tickets and money the device
+        may not have pulled yet; how they read out loud belongs to the screen.
         """
         warnings: list[str] = []
 
@@ -91,24 +98,20 @@ class DailyCloseService:
             count for status, count in summary.by_status.items() if status in OPEN_STATUSES
         )
         if open_tickets:
-            warnings.append(
-                f"{open_tickets} of the day's tickets have not been handed back yet."
-            )
+            warnings.append(f"open_tickets:{open_tickets}")
         if summary.balance > ZERO:
-            warnings.append(
-                f"The day's tickets still have {summary.balance} uncollected."
-            )
+            warnings.append(f"uncollected:{summary.balance}")
 
         # `expenses_total` counts what the day owes and the arqueo only what left,
         # so the gap between them is exactly what is still pending (§5.3).
         pending = totals.expenses_total - (totals.cash_expenses + totals.transfer_expenses)
         if pending > ZERO:
-            warnings.append(f"{pending} of the day's expenses are still pending payment.")
+            warnings.append(f"pending_expenses:{pending}")
 
         if await self._was_reopened(day):
             # D9 says a reopening "obliga a re-cerrar". Nothing can force a
             # person's hand, so the day says so itself until it is closed again.
-            warnings.append("This day was closed and reopened: it has to be closed again.")
+            warnings.append("reopened")
 
         return warnings
 

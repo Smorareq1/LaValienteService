@@ -125,6 +125,13 @@ papel donde escribe**:
 Reabrir un día (`POST /daily-close/{id}/reopen`, solo administrador) levanta el
 candado y deja rastro; el acta reabierta se conserva y obliga a volver a cerrar.
 
+`GET /daily-close/preview` acompaña las cifras con `warnings`: lo que vale la pena
+leer antes de firmar, y que **nunca** impide cerrar. Viajan como `código` o
+`código:valor` —`open_tickets:3`, `uncollected:120.00`, `pending_expenses:80.00`,
+`reopened`— igual que los avisos del motor de sincronización, y no como frases: el
+servidor es el único que puede contarlas (ve las boletas de todos los
+dispositivos), pero la frase la escribe el cliente, que es el que habla español.
+
 ### 6.2 Existencias
 
 Una venta de mostrador reparte FIFO sobre los lotes vendibles. Si no alcanza, la

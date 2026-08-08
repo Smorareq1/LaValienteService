@@ -236,7 +236,7 @@ class TestWarnings:
 
         preview = await service.preview(DAY)
 
-        assert any("have not been handed back" in w for w in preview.warnings)
+        assert "open_tickets:2" in preview.warnings
 
     async def test_a_delivered_day_says_nothing_about_deliveries(self) -> None:
         service, _ = make_service(
@@ -245,14 +245,14 @@ class TestWarnings:
 
         preview = await service.preview(DAY)
 
-        assert not any("handed back" in w for w in preview.warnings)
+        assert not any(w.startswith("open_tickets") for w in preview.warnings)
 
     async def test_money_still_owed_on_the_day_is_flagged(self) -> None:
         service, _ = make_service(orders=FakeOrdersService(balance=q("120.00")))
 
         preview = await service.preview(DAY)
 
-        assert any("uncollected" in w for w in preview.warnings)
+        assert "uncollected:120.00" in preview.warnings
 
     async def test_expenses_left_pending_are_flagged(self) -> None:
         """Q200 written down, Q120 actually paid: Q80 the drawer never saw."""
@@ -264,7 +264,7 @@ class TestWarnings:
 
         preview = await service.preview(DAY)
 
-        assert any("80.00" in w and "pending" in w for w in preview.warnings)
+        assert "pending_expenses:80.00" in preview.warnings
 
     async def test_none_of_them_stops_the_close(self) -> None:
         """§6.1: a warning, never a block. The counter is standing there with
@@ -404,7 +404,7 @@ class TestReopening:
         preview = await service.preview(DAY)
 
         assert preview.is_closed is False
-        assert any("has to be closed again" in w for w in preview.warnings)
+        assert "reopened" in preview.warnings
 
     async def test_reopening_the_same_close_twice_is_not_found(self) -> None:
         service, _ = make_service(**the_real_day())

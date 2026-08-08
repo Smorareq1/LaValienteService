@@ -48,7 +48,9 @@ class DailyClosePreview(DayFigures):
     """The sheet on screen while the day is still open (§6.1)."""
 
     #: Things worth reading before closing, never a reason to refuse: tickets not
-    #: handed back, money still owed, expenses left pending.
+    #: handed back, money still owed, expenses left pending. Coded as `code` or
+    #: `code:value` — `open_tickets:3`, `uncollected:120.00`,
+    #: `pending_expenses:80.00`, `reopened` — so the client writes the sentence.
     warnings: list[str] = Field(default_factory=list)
     is_closed: bool = False
     #: Present once the day is closed — what the snapshot below was filed under.
