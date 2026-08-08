@@ -4,7 +4,12 @@ from uuid import UUID
 
 from fastapi import APIRouter, Depends, Query, status
 
-from src.api.dependencies import CurrentUser, OrdersServiceDependency, require_permission
+from src.api.dependencies import (
+    CurrentUser,
+    OrdersServiceDependency,
+    ScanServiceDependency,
+    require_permission,
+)
 from src.core.business_time import business_date
 from src.modules.orders.models import OrderStatus
 from src.modules.orders.schemas import (
@@ -29,7 +34,10 @@ router = APIRouter(prefix="/orders", tags=["Orders"])
     dependencies=[Depends(require_permission("orders.create"))],
 )
 async def create_order(
-    data: OrderCreate, service: OrdersServiceDependency, user: CurrentUser
+    data: OrderCreate,
+    service: OrdersServiceDependency,
+    scans: ScanServiceDependency,
+    user: CurrentUser,
 ) -> OrderRead:
     """Take an order.
 
@@ -37,8 +45,15 @@ async def create_order(
     from the catalog in force on the order's date (Plan 0001 D5). A manual
     discount additionally demands `orders.manual_discount`, which the service
     checks because the condition is the payload, not the route.
+
+    A `scan_id` closes the loop of Plan 0003 D7: the ticket is linked back to the
+    reading it came from and the diff of everything the person had to correct is
+    recorded. It happens **here** and not inside `OrdersService`, so the orders
+    module never learns that the scan module exists.
     """
     order, warnings = await service.create(data, actor=user)
+    if data.scan_id is not None:
+        await scans.link_order(data.scan_id, order, data)
     read = OrderRead.model_validate(order)
     read.warnings = warnings
     return read

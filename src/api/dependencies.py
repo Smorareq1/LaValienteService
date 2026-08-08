@@ -19,6 +19,9 @@ from src.modules.identity.models import User
 from src.modules.identity.permissions import ensure_catalogued
 from src.modules.identity.repository import IdentityRepository
 from src.modules.identity.service import IdentityService
+from src.modules.intake_scan.extractor import GeminiExtractor
+from src.modules.intake_scan.repository import ScanRepository
+from src.modules.intake_scan.service import ScanService
 from src.modules.inventory.repository import InventoryRepository
 from src.modules.inventory.service import InventoryService
 from src.modules.orders.repository import OrdersRepository
@@ -151,6 +154,25 @@ def get_promotions_service(session: DbSession) -> PromotionsService:
 PromotionsServiceDependency = Annotated[PromotionsService, Depends(get_promotions_service)]
 
 
+def get_scan_service(session: DbSession) -> ScanService:
+    """Reading a ticket needs the garment catalog to map names and the customers
+    to suggest one, so it composes both repositories — read-only, both of them.
+
+    The extractor is built here and nowhere else, which is what D6 buys: swapping
+    provider is this line. Kept out of the service's constructor default so a
+    test can hand over a fake without the real one ever being constructed.
+    """
+    return ScanService(
+        ScanRepository(session),
+        GeminiExtractor(),
+        CatalogRepository(session),
+        CustomersRepository(session),
+    )
+
+
+ScanServiceDependency = Annotated[ScanService, Depends(get_scan_service)]
+
+
 def get_staff_service(session: DbSession) -> StaffService:
     return StaffService(StaffRepository(session))
 
@@ -176,6 +198,10 @@ def get_sync_service(session: DbSession) -> SyncService:
         get_staff_service(session),
         get_expenses_service(session),
         get_inventory_service(session),
+        # The app captures locally and pushes, so this — not `POST /orders` — is
+        # the path a scanned ticket actually takes. Without it the corrections
+        # metric of Plan 0003 D7 would only ever see tickets nobody scanned.
+        get_scan_service(session),
     )
 
 

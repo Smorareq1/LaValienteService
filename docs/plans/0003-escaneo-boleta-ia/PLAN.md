@@ -2,7 +2,7 @@
 
 | | |
 |---|---|
-| **Estado** | 📝 Borrador |
+| **Estado** | ✅ Implementado (2026-08-08) — falta el set dorado del §9 |
 | **Fecha** | 2026-07-22 |
 | **Módulos afectados** | Backend: `intake_scan` (nuevo, aislado). APP: pantalla de escaneo |
 | **Depende de** | [Plan 0001](../0001-pedidos-diarios/PLAN.md) (pedidos), [Plan 0002](../0002-ui-toma-pedido/PLAN.md) (formulario que se prellena) |
@@ -250,11 +250,25 @@ Esto es lo que separa "demo que a veces funciona" de un módulo confiable:
 
 1. **Almacenamiento de imágenes:** ¿disco del servidor basta (con backup) o desde ya un bucket
    S3-compatible? Afecta `SCAN_STORAGE_PATH` y el script de retención.
+   → **Disco, por ahora.** `storage.py` guarda bajo `SCAN_STORAGE_PATH` archivando por día
+   (`2026/08/08/…`), que es lo que hace que la retención de D9 borre un rango de directorios en
+   vez de recorrer cada archivo mirando su fecha. Mudarlo a un bucket es reescribir ese módulo
+   —cuatro funciones— sin tocar la columna, igual que la foto de producto del plan 0005 D10.
 2. **Presupuesto mensual** para Gemini: define `SCAN_DAILY_LIMIT` real (con Flash el costo por
    escaneo es de centavos, pero conviene fijar tope).
+   → **Sigue abierta**, y es la única que necesita una respuesta de la dueña. El tope está
+   implementado y puesto en 200/día, contado sobre toda la lavandería y no por usuario —el
+   presupuesto es del negocio, no de quien esté en el mostrador—. Ese número es un marcador
+   hasta que haya una cifra real.
 3. ¿Interesa el **backfill** de boletas históricas en lote cuando el módulo esté estable?
+   → **No entra en la fase 1** y no se implementó nada hacia ahí. El §2 ya lo dejaba fuera;
+   se anota que la infraestructura que haría falta —extractor, validación, `scan_jobs`— ya
+   existe, así que el día que interese es un script, no un módulo.
 4. ¿La foto se toma solo desde la cámara o también se acepta **galería** (fotos que mandan por
    WhatsApp)? Recomendado: ambas.
+   → **Ambas**, como recomendaba. La pantalla ofrece los dos botones y `TicketPhotoPicker` los
+   trata igual. Obligar a re-fotografiar la pantalla del teléfono para una boleta que ya llegó
+   por WhatsApp habría sido trabajo inventado.
 
 ## Historial
 
@@ -262,3 +276,4 @@ Esto es lo que separa "demo que a veces funciona" de un módulo confiable:
 |---|---|
 | 2026-07-22 | Versión inicial |
 | 2026-07-22 | D8 ampliada: módulo online-only según el Plan 0004; sin red se deshabilita el escaneo y la captura manual offline sigue funcionando. |
+| 2026-08-08 | **Implementado de punta a punta**, del PR A al PR D más la pantalla: módulo `intake_scan` con `scan_jobs` (migración `20260808_0013`), los nueve ajustes `SCAN_*`, el prompt `v1` versionado con su changelog, `ScanExtractor` con la implementación de Gemini, la validación determinista del §7, el matching de cliente, los endpoints `POST /scans`, `GET /scans/{id}` y `GET /scans/{id}/image`, el `scan_id` de `POST /orders` con su diff de correcciones, y los scripts `eval_scan.py` y `prune_scans.py`. En la app: la pantalla de escaneo, el volcado sobre la toma de pedido y los avisos traducidos. Verificado: 398 pruebas de backend y 414 de la app en verde, `mypy` sin errores nuevos, y la key de `.env` validada contra Google (`gemini-2.5-flash` disponible). **Nueve decisiones y desviaciones.** **(a)** El cliente de Gemini va por **HTTP con `httpx`** y no por el SDK de Google: lo que se necesita del API es un POST con un esquema adjunto —la parte estable— y el SDK sería una dependencia más que el retiro del §11 tendría que deshacer. **(b)** `scan_jobs` **no lleva `SyncableMixin`**, contra lo que haría cualquier otra tabla del sistema: un escaneo pertenece al minuto en que ocurrió y el teléfono que lo tomó ya tiene la respuesta; meterlo en el feed empujaría fotos del nombre, teléfono y NIT de alguien a todos los demás aparatos de la lavandería. **(c)** Las cajas de opciones del `responseSchema` son **listas cerradas** (G/E/P, T40–T60, N2–N4, R/S/T10/SU) y no mapas libres, porque la salida estructurada de Gemini no admite `additionalProperties` — y porque un código que el catálogo no conoce es una mala lectura, no un servicio nuevo. **(d)** El §7.3 pedía comprobar que el peso del encabezado y las libras cobradas cuadren; el motor del plan 0001 §6 **rechaza** un pedido donde no cuadran, y aquí eso sería un callejón sin salida —nadie puede discutir con una fotografía—, así que el encabezado **sigue a las libras cobradas** y la discrepancia se reporta. **(e)** Los avisos viajan **codificados** (`total_mismatch:108.75:98.75`), como los del cierre y los del motor de sincronización: el servidor es el único que puede detectarlos y la app es la que habla español. **(f)** El `scan_id` viaja en `OrderCreate` y se consume **una capa más arriba** —en el endpoint y en el handler de sync—, nunca dentro de `OrdersService`, que es lo que mantiene la dirección de D2. Y tuvo que entrar también al camino de **sincronización**, porque la app captura local y empuja: `POST /orders` no es la ruta que toma una boleta escaneada, así que sin eso la métrica de D7 solo habría visto las boletas que nadie escaneó. Sync lo hace contra un `Protocol` que declara él mismo (`ScanLinker`), así que no importa nada de este módulo. **(g)** Un fallo del proveedor **conserva la fila** en `failed` en vez de deshacerla: es lo que distingue «el proveedor está caído» de «nadie está escaneando». **(h)** La foto se pide a 2560 px y calidad 90, no a los 1440/82 de la foto de producto: lo que hay que distinguir es un 1 de un 7 a lápiz sobre papel de talonario. **(i)** Se acepta **galería además de cámara**, que es lo que la pregunta abierta 4 recomendaba: llegan boletas fotografiadas y mandadas por WhatsApp. **Lo que no entró: el set dorado del §9.** `eval_scan.py` está escrito y corre, pero `tests/fixtures/scan_golden/` está vacío porque son **fotos reales de boletas** —veinte, variadas, anotadas a mano— y eso no se puede escribir desde aquí. Hasta que exista, la regla de D5 («no se sube un prompt que empeore la exactitud») no tiene contra qué medirse, y `v1` no tiene número en su changelog. |

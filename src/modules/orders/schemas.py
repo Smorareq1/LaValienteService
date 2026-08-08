@@ -97,6 +97,16 @@ class OrderCreate(BaseModel):
     #: Devices mint ids offline so a ticket can be printed before it has ever
     #: reached the server (Plan 0004 D3).
     id: UUID | None = None
+    #: The reading this ticket was captured from, if any (Plan 0003 §8, D7).
+    #:
+    #: **`OrdersService` never looks at it.** It is consumed one level up — by
+    #: the endpoint and by the sync handler — which then asks `intake_scan` to
+    #: record the diff between what the model proposed and what the person
+    #: actually saved. That keeps the direction of D2 intact: this module knows
+    #: the field exists and nothing about what reads it, and the day the paper
+    #: booklet is dropped, retiring the scan module is deleting these three
+    #: lines along with it.
+    scan_id: UUID | None = None
 
     @model_validator(mode="after")
     def _needs_exactly_one_customer(self) -> "OrderCreate":

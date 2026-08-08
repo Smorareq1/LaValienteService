@@ -91,6 +91,12 @@ CATALOG: tuple[PermissionSpec, ...] = (
     # for `staff.manage`, not for this.
     PermissionSpec("staff", "read", "See employees, shifts and the day's attendance", True),
     PermissionSpec("staff", "manage", "Administer employees, shifts and rates", False),
+    # Plan 0003 §8. The scan is the accessibility module of *everyone* — it is
+    # how someone who types slowly takes an order — so the collaborator holds
+    # both. They are the only codes here belonging to a module that is meant to
+    # be deleted: the day the shop drops the paper booklet, these two go with it.
+    PermissionSpec("scans", "create", "Scan a paper ticket to draft an order", True),
+    PermissionSpec("scans", "read", "Look up a scan and its photo", True),
     # Not in the plans' tables: device revocation (Plan 0004 D11) needs a
     # permission of its own and it is squarely an administrator's call.
     PermissionSpec("sync.devices", "manage", "List and revoke synchronization devices", False),

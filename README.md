@@ -122,6 +122,49 @@ vuelto que se da en el mostrador no es dinero que se quedó en la caja. Entregar
 pendiente exige `orders.deliver_unpaid`: fiar es una decisión, no un descuido, y el pedido
 sigue aceptando pagos después de entregado, que es como se salda.
 
+## Escaneo de boleta con IA (módulo temporal)
+
+`intake_scan` lee una fotografía de la boleta de papel con Gemini y devuelve un **borrador**
+que la app usa para prellenar la toma de pedido. Es temporal por diseño (plan 0003 D2): el día
+que la operación abandone el talonario, retirarlo es apagar el flag, borrar
+`src/modules/intake_scan/`, sus endpoints y sus ajustes, y una migración de limpieza.
+
+Está **apagado por omisión**. Para encenderlo hacen falta dos variables:
+
+```bash
+SCAN_ENABLED=true
+GEMINI_API_KEY=...   # solo en el backend; la app nunca la ve (D1)
+```
+
+Los demás ajustes tienen valores por omisión razonables: `SCAN_MODEL` (`gemini-2.5-flash`),
+`SCAN_PROMPT_VERSION` (`v1`), `SCAN_TIMEOUT_S` (30), `SCAN_MAX_IMAGE_MB` (8),
+`SCAN_DAILY_LIMIT` (200, el control de costos), `SCAN_STORAGE_PATH` (`./media/scans`) y
+`SCAN_IMAGE_RETENTION_DAYS` (90).
+
+La regla que no se rompe: **la IA nunca guarda un pedido.** Produce un borrador que una persona
+revisa y confirma, y el motor de precios del plan 0001 §6 recalcula todos los montos — los
+totales leídos de la foto solo sirven para avisar de una discrepancia. Y si Gemini falla, tarda
+o devuelve basura, la captura a mano funciona entera sin este módulo (D8).
+
+Las fotos contienen datos personales, así que se sirven solo con `scans.read` y se borran
+pasado su plazo:
+
+```bash
+poetry run python -m scripts.prune_scans --dry-run   # lista lo que se iría
+poetry run python -m scripts.prune_scans             # lo borra
+```
+
+Al cambiar el prompt o el modelo hay que correr la evaluación contra el set dorado y comparar
+con la corrida anterior; la regla del plan es que no se sube una versión que empeore la
+exactitud global. **El set dorado todavía no existe** — son fotos reales de boletas anotadas a
+mano, mínimo veinte y variadas, en `tests/fixtures/scan_golden/`:
+
+```bash
+poetry run python -m scripts.eval_scan
+```
+
+No corre en CI: necesita la key y cada corrida cuesta dinero.
+
 ### Usuario para las pruebas end-to-end
 
 Las pruebas de integración de la app necesitan una cuenta propia, para no usar la de una persona

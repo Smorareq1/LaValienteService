@@ -35,6 +35,25 @@ class Settings(BaseSettings):
     media_max_image_mb: int = Field(default=5, gt=0, le=50)
     media_allowed_formats: list[str] = ["jpg", "jpeg", "png", "webp"]
 
+    # --- Escaneo de boleta con IA (Plan 0003 §8). Todo el bloque es del módulo
+    # `intake_scan`, que es temporal por diseño (D2): el día del retiro estos
+    # ajustes se borran con él y nada más los lee.
+    #: Interruptor global (D2). Apagado por omisión: un despliegue sin key no
+    #: debe ofrecer un botón que sólo puede fallar.
+    scan_enabled: bool = False
+    #: Secreto, y sólo del backend (D1). La app nunca lo ve: sube la foto a
+    #: nuestra API y es el servidor quien habla con Gemini.
+    gemini_api_key: SecretStr | None = None
+    scan_model: str = "gemini-2.5-flash"
+    #: Debe existir como `prompts/{version}.md` (D5).
+    scan_prompt_version: str = "v1"
+    scan_timeout_s: int = Field(default=30, gt=0, le=120)
+    scan_max_image_mb: int = Field(default=8, gt=0, le=50)
+    #: Tope diario de escaneos, que es el control de costos del §12.2.
+    scan_daily_limit: int = Field(default=200, ge=0)
+    scan_storage_path: Path = Path("./media/scans")
+    scan_image_retention_days: int = Field(default=90, ge=1)
+
     @field_validator("media_allowed_formats", "cors_origins", mode="before")
     @classmethod
     def _split_csv(cls, value: object) -> object:
@@ -51,6 +70,10 @@ class Settings(BaseSettings):
     @property
     def media_max_image_bytes(self) -> int:
         return self.media_max_image_mb * 1024 * 1024
+
+    @property
+    def scan_max_image_bytes(self) -> int:
+        return self.scan_max_image_mb * 1024 * 1024
 
     @property
     def async_database_url(self) -> str:

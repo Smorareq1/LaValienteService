@@ -263,17 +263,45 @@ class IdentityService:
 
     async def list_users(self) -> list[UserSummaryRead]:
         users = await self.repository.list_users()
-        return [
-            UserSummaryRead(
-                id=user.id,
-                username=user.username,
-                email=user.email,
-                full_name=user.full_name,
-                is_active=user.is_active,
-                roles=sorted(assignment.role.code for assignment in user.role_assignments),
-            )
-            for user in users
-        ]
+        return [self.user_summary_view(user) for user in users]
+
+    @staticmethod
+    def user_summary_view(user: User) -> UserSummaryRead:
+        return UserSummaryRead(
+            id=user.id,
+            username=user.username,
+            email=user.email,
+            full_name=user.full_name,
+            is_active=user.is_active,
+            roles=sorted(assignment.role.code for assignment in user.role_assignments),
+        )
+
+    async def set_user_active(self, actor: User, user_id: UUID, is_active: bool) -> UserSummaryRead:
+        """Turn an account on or off. The row stays; the history keeps pointing at it.
+
+        Accounts are never deleted, which is why this exists at all: a ticket
+        taken last March names whoever received it, and dropping the row would
+        turn that audit line into a dangling id.
+
+        Two things happen on the way out. The account cannot be *its own* target
+        — an administrator who switches themselves off is locked out of the
+        screen that would switch them back on, and the only way back would be the
+        script this screen exists to replace. And the sessions are revoked:
+        `authenticate_access_token` already refuses an inactive user, so that is
+        not what closes the door, but a refresh token left alive would outlive
+        the decision and resurrect a session the day the account is turned back
+        on.
+        """
+        user = await self.repository.get_user_with_access(user_id)
+        if user is None:
+            raise NotFoundError("User not found.")
+        if user.id == actor.id and not is_active:
+            raise ConflictError("An account cannot deactivate itself.")
+        user.is_active = is_active
+        if not is_active:
+            await self.repository.revoke_all_sessions(user.id)
+        await self.repository.commit()
+        return self.user_summary_view(user)
 
     def ensure_permission(self, user: User, permission_code: str) -> None:
         if not self.has_permission(user, permission_code):

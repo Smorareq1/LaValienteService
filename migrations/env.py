@@ -17,6 +17,7 @@ from src.modules.customers import models as customers_models  # noqa: F401
 from src.modules.daily_close import models as daily_close_models  # noqa: F401
 from src.modules.expenses import models as expenses_models  # noqa: F401
 from src.modules.identity import models as identity_models  # noqa: F401
+from src.modules.intake_scan import models as intake_scan_models  # noqa: F401
 from src.modules.inventory import models as inventory_models  # noqa: F401
 from src.modules.orders import models as orders_models  # noqa: F401
 from src.modules.promotions import models as promotions_models  # noqa: F401

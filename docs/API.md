@@ -219,6 +219,7 @@ con estar autenticado.
 | `POST` | `/api/v1/authorization/permissions` | `authorization.permissions.manage` |
 | `POST` | `/api/v1/authorization/roles` | `authorization.roles.manage` |
 | `PUT` | `/api/v1/authorization/roles/{role_id}/permissions` | `authorization.roles.manage` |
+| `PATCH` | `/api/v1/authorization/users/{user_id}` | `authorization.users.manage` |
 | `PUT` | `/api/v1/authorization/users/{user_id}/roles` | `authorization.users.manage` |
 | `PUT` | `/api/v1/authorization/users/{user_id}/permissions` | `authorization.users.manage` |
 
@@ -305,6 +306,14 @@ con estar autenticado.
 | `GET` | `/api/v1/promotions` | `promotions.read` |
 | `POST` | `/api/v1/promotions` | `promotions.manage` |
 | `PATCH` | `/api/v1/promotions/{promotion_id}` | `promotions.manage` |
+
+### Intake scan
+
+| Método | Ruta | Permiso |
+|---|---|---|
+| `POST` | `/api/v1/scans` | `scans.create` |
+| `GET` | `/api/v1/scans/{scan_id}` | `scans.read` |
+| `GET` | `/api/v1/scans/{scan_id}/image` | `scans.read` |
 
 ### Staff
 

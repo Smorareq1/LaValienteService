@@ -103,6 +103,11 @@ class TestWhatTheCollaboratorGets:
             "orders.read",
             "orders.update",
             "promotions.read",
+            # Plan 0003 §8. The scan is the accessibility module of *everyone*:
+            # it is how somebody who types slowly takes an order, so withholding
+            # it from the counter would defeat the point of building it.
+            "scans.create",
+            "scans.read",
             "staff.read",
             "supply_sales.create",
             "supply_sales.read",

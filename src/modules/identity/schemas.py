@@ -103,6 +103,18 @@ class UserPermissionReplace(BaseModel):
     assignments: list[UserPermissionAssignment]
 
 
+class UserStatusUpdate(BaseModel):
+    """Turn an account on or off.
+
+    Deliberately its own one-field schema and not a general `UserUpdate`: the
+    other columns of an account (username, password, email) each have their own
+    door, and widening this one to a patch-anything endpoint would let a
+    misplaced field change a credential.
+    """
+
+    is_active: bool
+
+
 class CurrentUserRead(BaseModel):
     id: UUID
     username: str

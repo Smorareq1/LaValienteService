@@ -10,6 +10,7 @@ from src.api.v1.endpoints import (
     inventory,
     orders,
     promotions,
+    scans,
     staff,
     supply_sales,
     sync,
@@ -25,6 +26,7 @@ api_router.include_router(expenses.router)
 api_router.include_router(inventory.router)
 api_router.include_router(orders.router)
 api_router.include_router(promotions.router)
+api_router.include_router(scans.router)
 api_router.include_router(staff.router)
 api_router.include_router(supply_sales.router)
 api_router.include_router(sync.router)

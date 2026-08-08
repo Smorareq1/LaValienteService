@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import logging
 from datetime import UTC, datetime
-from typing import Any
+from typing import Any, Protocol
 from uuid import UUID
 
 from pydantic import ValidationError
@@ -54,6 +54,22 @@ WIPE_DIRECTIVE = "wipe"
 CLOCK_SKEW_WARNING_SECONDS = 300
 
 
+class ScanLinker(Protocol):
+    """Whatever can tie a ticket back to the reading it came from (Plan 0003 D7).
+
+    Declared here rather than imported so the dependency points the right way:
+    sync names a capability, and `intake_scan` happens to satisfy it. The whole
+    of the coupling is this protocol and one `if` in `_apply_order` — which is
+    what makes the retirement of Plan 0003 §11 a deletion and not a refactor.
+
+    It matters that this exists at all: the app captures locally and pushes, so
+    `POST /orders` is not the path a scanned ticket actually takes. Without this,
+    the corrections metric would only ever see the tickets nobody scanned.
+    """
+
+    async def link_order(self, scan_id: UUID, order: Any, data: OrderCreate) -> None: ...
+
+
 class SyncService:
     """Push/pull protocol of Plan 0004 §7.
 
@@ -71,6 +87,7 @@ class SyncService:
         staff: StaffService,
         expenses: ExpensesService,
         inventory: InventoryService,
+        scans: ScanLinker | None = None,
     ) -> None:
         self.repository = repository
         self.customers = customers
@@ -79,6 +96,11 @@ class SyncService:
         self.staff = staff
         self.expenses = expenses
         self.inventory = inventory
+        #: Optional, and typed by a protocol this module declares (see
+        #: `ScanLinker`), so sync never imports the scan module. `None` is the
+        #: shape of the system once Plan 0003 is retired, and every test that
+        #: does not care about scanning leaves it out.
+        self.scans = scans
 
     # -- devices ---------------------------------------------------------
 
@@ -287,6 +309,10 @@ class SyncService:
                     {**operation.payload, "id": operation.entity_id}
                 )
                 order, warnings = await self.orders.create(creation, actor=user)
+                if creation.scan_id is not None and self.scans is not None:
+                    # After the order is saved, never before: the corrections
+                    # metric of D7 is a nice-to-have and the ticket is not.
+                    await self.scans.link_order(creation.scan_id, order, creation)
                 return order.version, self._serialize("order", order), warnings
 
             case ("order", "update"):
