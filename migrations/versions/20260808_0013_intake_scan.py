@@ -27,16 +27,16 @@ down_revision: str | Sequence[str] | None = "20260805_0012"
 branch_labels: str | Sequence[str] | None = None
 depends_on: str | Sequence[str] | None = None
 
-SCAN_STATUS = sa.Enum(
+# postgresql.ENUM y no sa.Enum: `create_type` es del dialecto de Postgres y el
+# tipo genérico lo ignora, así que la columna volvería a emitir CREATE TYPE al
+# crear la tabla y chocaría con el de abajo. Misma forma que 0001, 0002 y 0003.
+SCAN_STATUS = postgresql.ENUM(
     "processing", "completed", "failed", name="scan_status", create_type=False
 )
 
 
 def upgrade() -> None:
-    scan_status = postgresql.ENUM(
-        "processing", "completed", "failed", name="scan_status", create_type=False
-    )
-    scan_status.create(op.get_bind(), checkfirst=True)
+    SCAN_STATUS.create(op.get_bind(), checkfirst=True)
 
     op.create_table(
         "scan_jobs",
@@ -86,5 +86,8 @@ def upgrade() -> None:
 
 
 def downgrade() -> None:
+    op.drop_index("ix_scan_jobs_status", table_name="scan_jobs")
+    op.drop_index("ix_scan_jobs_order_id", table_name="scan_jobs")
+    op.drop_index("ix_scan_jobs_created_at", table_name="scan_jobs")
     op.drop_table("scan_jobs")
     postgresql.ENUM(name="scan_status").drop(op.get_bind(), checkfirst=True)
