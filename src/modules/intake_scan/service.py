@@ -9,6 +9,7 @@ looked at every field it was unsure about.
 from __future__ import annotations
 
 import logging
+from dataclasses import dataclass, field
 from datetime import UTC, date, datetime
 from decimal import Decimal
 from typing import Any
@@ -24,21 +25,30 @@ from src.modules.identity.models import User
 from src.modules.intake_scan import storage
 from src.modules.intake_scan.extractor import ScanExtractor, ScanFailure
 from src.modules.intake_scan.matching import best_match, phone_for_lookup
-from src.modules.intake_scan.models import ScanJob, ScanStatus
+from src.modules.intake_scan.models import ScanJob, ScanPurpose, ScanStatus
 from src.modules.intake_scan.normalization import (
     Normalized,
     check_total,
     draft_charges,
+    draft_field,
     normalize,
+    normalize_serial,
+    resolve_date,
 )
 from src.modules.intake_scan.repository import ScanRepository
 from src.modules.intake_scan.schemas import (
+    MATCHED_ON_BOOKLET_SERIAL,
+    MATCHED_ON_DAILY_NUMBER,
     CustomerMatch,
+    DraftField,
     RawScan,
     ScanDraft,
+    ScanLookupMatch,
+    ScanLookupRead,
     ScanRead,
 )
 from src.modules.orders.pricing import PriceBook, PricedOrder, price_order
+from src.modules.orders.repository import OrdersRepository
 from src.modules.orders.schemas import OrderCreate
 
 logger = logging.getLogger(__name__)
@@ -46,6 +56,22 @@ logger = logging.getLogger(__name__)
 #: How many name candidates the fuzzy match looks at. The shop has hundreds of
 #: customers, not millions, and the query is already narrowed by a name fragment.
 NAME_CANDIDATES = 25
+
+
+@dataclass
+class ResolvedTicket:
+    """What a delivery lookup made of one reading.
+
+    Both halves travel together because the screen needs both: the tickets it
+    found, and what the model thought it was reading when it found them. A match
+    the counter disagrees with is only arguable if the reading is visible.
+    """
+
+    order_date: DraftField[date]
+    daily_number: DraftField[int]
+    booklet_serial: DraftField[str]
+    matches: list[ScanLookupMatch] = field(default_factory=list)
+    warnings: list[str] = field(default_factory=list)
 
 
 class ScanService:
@@ -57,11 +83,15 @@ class ScanService:
         extractor: ScanExtractor,
         catalog: CatalogRepository,
         customers: CustomersRepository,
+        orders: OrdersRepository,
     ) -> None:
         self.repository = repository
         self.extractor = extractor
         self.catalog = catalog
         self.customers = customers
+        #: Read-only, and only for the delivery lookup: this module identifies
+        #: tickets, it never writes one (D2).
+        self.orders = orders
 
     async def scan(self, image: bytes, *, actor: User) -> ScanRead:
         """The whole of §4 for one photograph."""
@@ -123,6 +153,178 @@ class ScanService:
             },
         )
         return self._view(job, draft)
+
+    async def lookup(self, image: bytes, *, actor: User) -> ScanLookupRead:
+        """Find the ticket in somebody's hand (Plan 0006 §7.1.1).
+
+        The same photograph, the same provider and the same prompt as `scan` —
+        only the question is different. There, the paper is about to become a
+        ticket; here it already is one, and all that is wanted of the reading is
+        the two identifiers that name it. Everything after the extraction is
+        therefore skipped: no pricing, no customer match, no draft.
+
+        Sharing the prompt rather than writing a lean one for the header is
+        deliberate (D5, D6). A second prompt would be a second thing to version,
+        to keep in step with the paper when the print shop changes the form, and
+        to regress separately — for a saving of a few cents on a call that is
+        made a few dozen times a day.
+
+        The photo is **not** kept. `scan` stores it because §4 puts it beside the
+        draft for review; here there is nothing to review — the person is holding
+        the original.
+        """
+        settings = get_settings()
+        if not settings.scan_enabled:
+            raise ScanFailure("Scanning is switched off on this deployment.")
+        await self._check_daily_limit()
+
+        job = ScanJob(
+            id=uuid4(),
+            status=ScanStatus.PROCESSING,
+            purpose=ScanPurpose.LOOKUP,
+            image_path="",
+            model=settings.scan_model,
+            prompt_version=settings.scan_prompt_version,
+            created_by_id=actor.id,
+        )
+        self.repository.add(job)
+        await self.repository.flush()
+
+        try:
+            extraction = await self.extractor.extract(image)
+        except ScanFailure as failure:
+            job.status = ScanStatus.FAILED
+            job.error = str(failure)
+            await self.repository.commit()
+            logger.warning(
+                "scan lookup failed",
+                extra={"scan_id": str(job.id), "error": str(failure)},
+            )
+            raise
+
+        job.model = extraction.model
+        job.prompt_version = extraction.prompt_version
+        job.latency_ms = extraction.latency_ms
+        job.raw_response = extraction.payload
+
+        raw = RawScan.model_validate(extraction.payload)
+        resolved = await self._resolve_ticket(raw)
+
+        job.status = ScanStatus.COMPLETED
+        job.warnings = resolved.warnings
+        # What it read and what that turned out to be, so a complaint about the
+        # wrong ticket coming up can be answered from the row.
+        job.extracted = {
+            "order_date": resolved.order_date.model_dump(mode="json"),
+            "daily_number": resolved.daily_number.model_dump(mode="json"),
+            "booklet_serial": resolved.booklet_serial.model_dump(mode="json"),
+            "matched": [str(match.order_id) for match in resolved.matches],
+        }
+        await self.repository.commit()
+
+        logger.info(
+            "scan lookup completed",
+            extra={
+                "scan_id": str(job.id),
+                "latency_ms": extraction.latency_ms,
+                "matches": len(resolved.matches),
+                "warnings": len(resolved.warnings),
+            },
+        )
+        return ScanLookupRead(
+            id=job.id,
+            status=job.status,
+            model=job.model,
+            prompt_version=job.prompt_version,
+            latency_ms=job.latency_ms,
+            warnings=resolved.warnings,
+            order_date=resolved.order_date,
+            daily_number=resolved.daily_number,
+            booklet_serial=resolved.booklet_serial,
+            matches=resolved.matches,
+        )
+
+    async def _resolve_ticket(self, raw: RawScan) -> ResolvedTicket:
+        """From a reading to the ticket it names.
+
+        Legibility is the gate, not confidence alone: a serial the model is 30%
+        sure about is a guess, and a guess that resolves to a real ticket is
+        worse than no answer, because it hands back somebody else's clothes.
+        """
+        today = business_date()
+        order_date, date_warnings = resolve_date(raw, today)
+        daily_number = draft_field(
+            raw.header.daily_number.value,
+            raw.header.daily_number.confidence,
+            raw.header.daily_number.raw_text,
+        )
+        serial_value = normalize_serial(raw.header.booklet_serial.value)
+        booklet_serial = draft_field(
+            serial_value,
+            raw.header.booklet_serial.confidence,
+            raw.header.booklet_serial.raw_text,
+        )
+
+        wanted_serial = serial_value if raw.header.booklet_serial.is_legible else None
+        wanted_number = (
+            raw.header.daily_number.value if raw.header.daily_number.is_legible else None
+        )
+        if wanted_serial is None and wanted_number is None:
+            return ResolvedTicket(
+                order_date=order_date,
+                daily_number=daily_number,
+                booklet_serial=booklet_serial,
+                matches=[],
+                warnings=["ticket_unreadable"],
+            )
+
+        # `resolve_date` answers "today" for a blank box, which is right for a
+        # capture and right here too: the tickets being handed back at closing
+        # time are overwhelmingly the ones taken that morning.
+        orders = await self.orders.find_by_ticket(
+            booklet_serial=wanted_serial,
+            order_date=order_date.value,
+            daily_number=wanted_number,
+        )
+
+        warnings = list(date_warnings)
+        matches = [
+            ScanLookupMatch(
+                order_id=order.id,
+                order_date=order.order_date,
+                daily_number=order.daily_number,
+                booklet_serial=order.booklet_serial,
+                customer_id=order.customer_id,
+                status=order.status,
+                total_pieces=order.total_pieces,
+                total=order.total,
+                paid_total=order.paid_total,
+                balance=order.balance,
+                matched_on=(
+                    MATCHED_ON_BOOKLET_SERIAL
+                    if wanted_serial is not None and order.booklet_serial == wanted_serial
+                    else MATCHED_ON_DAILY_NUMBER
+                ),
+            )
+            for order in orders
+        ]
+
+        if not matches:
+            # Named so the screen can say which number it looked for. A ticket
+            # that is not here is usually a misread digit, and showing the digit
+            # is what lets somebody correct it by typing.
+            wanted = wanted_serial or str(wanted_number)
+            warnings.append(f"no_match:{wanted}")
+        elif len(matches) > 1:
+            warnings.append("serial_and_number_disagree")
+
+        return ResolvedTicket(
+            order_date=order_date,
+            daily_number=daily_number,
+            booklet_serial=booklet_serial,
+            matches=matches,
+            warnings=warnings,
+        )
 
     async def get(self, scan_id: UUID) -> ScanRead:
         job = await self.repository.get(scan_id)

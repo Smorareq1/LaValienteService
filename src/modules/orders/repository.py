@@ -126,6 +126,58 @@ class OrdersRepository:
             conditions.append(Order.daily_number == int(term))
         return or_(*conditions)
 
+    async def find_by_ticket(
+        self,
+        *,
+        booklet_serial: str | None = None,
+        order_date: date | None = None,
+        daily_number: int | None = None,
+    ) -> list[Order]:
+        """The ticket somebody is holding, by what is written on it.
+
+        Two identifiers, and they are not equally good. `booklet_serial` is
+        **printed** by the print shop and unique across the whole booklet, so a
+        hit on it is the ticket. `daily_number` is handwritten and only unique
+        within its day, so it needs the date to mean anything — which is why the
+        pair is taken together or not at all.
+
+        Both are tried and the results unioned rather than one falling back to
+        the other: when the serial and the number point at different tickets,
+        that disagreement is the useful answer, and a fallback would hide it by
+        silently preferring whichever was tried first.
+
+        Cancelled and already-delivered tickets are **not** filtered out. The
+        caller is about to tell somebody at a counter what this piece of paper
+        is, and "that one was handed back on Tuesday" is an answer; finding
+        nothing is not.
+        """
+        conditions: list[ColumnElement[bool]] = []
+        if booklet_serial:
+            # Compared through `btrim`/`upper` and not as stored: the serial on a
+            # ticket captured by hand is whatever somebody typed, `#A-0042` and
+            # `a-0042` included, and a delivery that cannot find the ticket
+            # because of a stray character is a worse outcome than a sequential
+            # scan of a table that grows by a few dozen rows a day.
+            conditions.append(
+                func.upper(func.btrim(Order.booklet_serial, " #")) == booklet_serial
+            )
+        if order_date is not None and daily_number is not None:
+            conditions.append(
+                (Order.order_date == order_date) & (Order.daily_number == daily_number)
+            )
+        if not conditions:
+            return []
+
+        statement = (
+            select(Order)
+            .where(Order.deleted_at.is_(None), or_(*conditions))
+            # Only the payments, for the same reason as `search`: the counter is
+            # deciding what to charge, and the balance is what it needs.
+            .options(selectinload(Order.payments.and_(OrderPayment.deleted_at.is_(None))))
+            .order_by(Order.order_date.desc(), Order.daily_number.desc())
+        )
+        return list((await self.session.scalars(statement)).all())
+
     async def search(
         self,
         *,

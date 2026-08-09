@@ -30,6 +30,25 @@ class ScanStatus(enum.StrEnum):
     FAILED = "failed"
 
 
+class ScanPurpose(enum.StrEnum):
+    """What the photograph was taken *for*.
+
+    Both purposes are the same call to the same provider with the same prompt,
+    and they share the daily budget of §8 — but they are not the same event, and
+    a column is what keeps them from being averaged together.
+
+    `intake` is §4: a ticket being captured, which ends in a draft a person
+    corrects, and whose corrections are the quality metric of §9. `lookup` is a
+    ticket that already exists being *found* so it can be handed back; nobody
+    corrects anything, so it proposes nothing and produces no diff. Scoring the
+    model on rows that never had a draft to get wrong would drag the metric
+    toward whatever fraction of the day's photos happened to be deliveries.
+    """
+
+    INTAKE = "intake"
+    LOOKUP = "lookup"
+
+
 def _enum_values(enum_cls: type[enum.Enum]) -> list[str]:
     """Persist enum *values* (lowercase) instead of member names."""
     return [member.value for member in enum_cls]
@@ -63,9 +82,24 @@ class ScanJob(Base):
         Enum(ScanStatus, name="scan_status", values_callable=_enum_values),
         default=ScanStatus.PROCESSING,
     )
+    #: Capture or delivery lookup. Defaulted to `intake` so every row written
+    #: before this column existed keeps meaning what it meant.
+    #:
+    #: Without an index of its own: two values over a table that grows by a few
+    #: dozen rows a day is exactly what 0012 went through the schema removing.
+    purpose: Mapped[ScanPurpose] = mapped_column(
+        Enum(ScanPurpose, name="scan_purpose", values_callable=_enum_values),
+        default=ScanPurpose.INTAKE,
+        server_default=ScanPurpose.INTAKE.value,
+    )
 
     #: Relative to `SCAN_STORAGE_PATH`, never the bytes (D9, and the same rule as
     #: the product image of Plan 0005 D10).
+    #:
+    #: Empty for a `lookup`: that photo is a ticket already in the database being
+    #: pointed at, so keeping it would add a picture of somebody's name, phone and
+    #: NIT to the disk for an answer nobody reviews side by side. `list_expired`
+    #: already reads `image_path != ""` as "there is no file here".
     image_path: Mapped[str] = mapped_column(String(500))
 
     #: Which model and which prompt produced this (D5). Without the pair, a drop

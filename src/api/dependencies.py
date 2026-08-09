@@ -156,7 +156,8 @@ PromotionsServiceDependency = Annotated[PromotionsService, Depends(get_promotion
 
 def get_scan_service(session: DbSession) -> ScanService:
     """Reading a ticket needs the garment catalog to map names and the customers
-    to suggest one, so it composes both repositories — read-only, both of them.
+    to suggest one; finding one already captured needs the orders. All three
+    read-only — this module proposes, it never writes a ticket (D2).
 
     The extractor is built here and nowhere else, which is what D6 buys: swapping
     provider is this line. Kept out of the service's constructor default so a
@@ -167,6 +168,7 @@ def get_scan_service(session: DbSession) -> ScanService:
         GeminiExtractor(),
         CatalogRepository(session),
         CustomersRepository(session),
+        OrdersRepository(session),
     )
 
 

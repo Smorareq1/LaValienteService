@@ -312,6 +312,7 @@ con estar autenticado.
 | Método | Ruta | Permiso |
 |---|---|---|
 | `POST` | `/api/v1/scans` | `scans.create` |
+| `POST` | `/api/v1/scans/lookup` | `scans.create` |
 | `GET` | `/api/v1/scans/{scan_id}` | `scans.read` |
 | `GET` | `/api/v1/scans/{scan_id}/image` | `scans.read` |
 

@@ -131,6 +131,26 @@ def normalize_nit(value: str | None) -> str | None:
     return f"{digits}{'-' + check if check else ''}"
 
 
+def normalize_serial(value: str | None) -> str | None:
+    """The printed booklet serial, as the one string it actually is.
+
+    Three things and no more: the surrounding whitespace, the `#` the paper
+    prints in front of it (`#Tomapedido 0042`), and the case. Hyphens and the
+    rest are left alone — what the print shop puts on the sheet is the
+    identifier, and this is not the place to decide which of its characters
+    count.
+
+    It matters twice over. On the way in, it is what stops `A-0042` and
+    `#a-0042` from being two tickets as far as the duplicate index is concerned.
+    On the way out, a delivery lookup compares this against what is stored, and
+    a comparison is only as good as both sides being spelled the same way.
+    """
+    if value is None:
+        return None
+    cleaned = " ".join(value.split()).lstrip("#").strip().upper()
+    return cleaned or None
+
+
 def _decimal(value: Any) -> Decimal | None:
     if value is None:
         return None
@@ -140,7 +160,7 @@ def _decimal(value: Any) -> Decimal | None:
         return None
 
 
-def _field[T](value: T | None, confidence: float, raw: str | None = None) -> DraftField[T]:
+def draft_field[T](value: T | None, confidence: float, raw: str | None = None) -> DraftField[T]:
     """A draft field, marked for review when the reading was not confident."""
     return DraftField[T](
         value=value,
@@ -162,7 +182,7 @@ def resolve_date(raw: RawScan, today: date) -> tuple[DraftField[date], list[str]
     confidence = min(box.day.confidence, box.month.confidence, box.year.confidence)
 
     if any(part is None for part in parts):
-        return _field(today, 1.0, None), []
+        return draft_field(today, 1.0, None), []
 
     day, month, year = parts
     assert day is not None and month is not None and year is not None
@@ -171,12 +191,12 @@ def resolve_date(raw: RawScan, today: date) -> tuple[DraftField[date], list[str]
     except ValueError:
         # A 31st of February is a misread digit, not a date. Falling back to
         # today keeps the capture moving and the warning says why.
-        return _field(today, 1.0), [f"date_unreadable:{year}-{month}-{day}"]
+        return draft_field(today, 1.0), [f"date_unreadable:{year}-{month}-{day}"]
 
     warnings: list[str] = []
     if abs(parsed - today) > DATE_TOLERANCE:
         warnings.append(f"date_far_from_today:{parsed.isoformat()}")
-    return _field(parsed, confidence), warnings
+    return draft_field(parsed, confidence), warnings
 
 
 def resolve_garments(
@@ -345,30 +365,30 @@ def normalize(raw: RawScan, *, today: date, garment_types: list[GarmentType]) ->
 
     return Normalized(
         order_date=order_date,
-        daily_number=_field(
+        daily_number=draft_field(
             raw.header.daily_number.value,
             raw.header.daily_number.confidence,
             raw.header.daily_number.raw_text,
         ),
-        booklet_serial=_field(
-            raw.header.booklet_serial.value,
+        booklet_serial=draft_field(
+            normalize_serial(raw.header.booklet_serial.value),
             raw.header.booklet_serial.confidence,
             raw.header.booklet_serial.raw_text,
         ),
-        nit=_field(nit, raw.header.nit.confidence, raw.header.nit.raw_text),
-        weight_lbs=_field(weight, raw.header.weight_lbs.confidence),
-        observations=_field(
+        nit=draft_field(nit, raw.header.nit.confidence, raw.header.nit.raw_text),
+        weight_lbs=draft_field(weight, raw.header.weight_lbs.confidence),
+        observations=draft_field(
             raw.observations.value, raw.observations.confidence, raw.observations.raw_text
         ),
-        customer_name=_field(
+        customer_name=draft_field(
             raw.customer.full_name.value,
             raw.customer.full_name.confidence,
             raw.customer.full_name.raw_text,
         ),
-        customer_phone=_field(
+        customer_phone=draft_field(
             phone, raw.customer.phone.confidence, raw.customer.phone.raw_text
         ),
-        customer_address=_field(
+        customer_address=draft_field(
             raw.customer.address.value, raw.customer.address.confidence
         ),
         garments=garments,

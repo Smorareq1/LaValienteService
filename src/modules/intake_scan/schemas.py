@@ -23,6 +23,7 @@ from uuid import UUID
 from pydantic import BaseModel, ConfigDict, Field
 
 from src.modules.intake_scan.models import ScanStatus
+from src.modules.orders.models import OrderStatus
 
 # --------------------------------------------------------------------- lectura
 
@@ -229,6 +230,75 @@ class ScanRead(BaseModel):
     #: the app writes the sentence in Spanish (Plan 0006, UI 8 note (c)).
     warnings: list[str] = Field(default_factory=list)
     draft: ScanDraft | None = None
+
+
+# ---------------------------------------------------------------- búsqueda
+
+#: What a match was found by, worst to best. The serial is printed and unique
+#: across the booklet; the number is handwritten and only unique within its day.
+MATCHED_ON_DAILY_NUMBER = "daily_number"
+MATCHED_ON_BOOKLET_SERIAL = "booklet_serial"
+
+
+class ScanLookupMatch(BaseModel):
+    """A ticket the photograph could be pointing at.
+
+    Deliberately not an `OrderSummary`: this is the answer to "which ticket is
+    this piece of paper", so it carries what the counter needs to recognise it
+    and settle it — the number, the money, the state — and `matched_on`, which
+    is how sure the server is that it is the right one.
+
+    The customer's name is **not** here. The device already mirrors customers
+    (Plan 0004), so it can name the ticket itself, and sending it back would put
+    a name on the wire for every photo taken at the counter.
+    """
+
+    model_config = ConfigDict(from_attributes=True)
+
+    order_id: UUID
+    order_date: date
+    daily_number: int
+    booklet_serial: str | None = None
+    customer_id: UUID
+    status: OrderStatus
+    total_pieces: int
+    total: Decimal
+    paid_total: Decimal
+    balance: Decimal
+    matched_on: str
+
+
+class ScanLookupRead(BaseModel):
+    """`POST /scans/lookup` — the ticket in somebody's hand, identified.
+
+    No `draft`. Nothing here is going to be captured: the ticket exists, and
+    what comes back is *which* one plus what was read off the paper, so the
+    screen can show the counter what the model thought it saw when the two
+    disagree.
+
+    `matches` is a list and usually holds one. Zero means the paper could not be
+    read or names a ticket this database does not have; two means the printed
+    serial and the handwritten number point at different tickets, and that is a
+    question for the person holding it, not for the server.
+    """
+
+    id: UUID
+    status: ScanStatus
+    model: str
+    prompt_version: str
+    latency_ms: int | None = None
+    error: str | None = None
+    #: Coded, like everywhere else: `ticket_unreadable`, `no_match:4`,
+    #: `serial_and_number_disagree`. The app writes the Spanish.
+    warnings: list[str] = Field(default_factory=list)
+
+    #: What was read off the paper, with its confidence — so a wrong match can
+    #: be explained ("leyó 9 donde dice 4") instead of just being wrong.
+    order_date: DraftField[date] = Field(default_factory=DraftField[date])
+    daily_number: DraftField[int] = Field(default_factory=DraftField[int])
+    booklet_serial: DraftField[str] = Field(default_factory=DraftField[str])
+
+    matches: list[ScanLookupMatch] = Field(default_factory=list)
 
 
 class ScanCorrections(BaseModel):

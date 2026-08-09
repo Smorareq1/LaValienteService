@@ -4,7 +4,7 @@ from uuid import UUID
 from fastapi import APIRouter, Depends, File, Response, UploadFile, status
 
 from src.api.dependencies import CurrentUser, ScanServiceDependency, require_permission
-from src.modules.intake_scan.schemas import ScanRead
+from src.modules.intake_scan.schemas import ScanLookupRead, ScanRead
 
 router = APIRouter(prefix="/scans", tags=["Intake scan"])
 
@@ -35,6 +35,41 @@ async def create_scan(
     works without this module at all (D8), which is what makes it survivable.
     """
     return await service.scan(await file.read(), actor=user)
+
+
+@router.post(
+    "/lookup",
+    response_model=ScanLookupRead,
+    dependencies=[Depends(require_permission("scans.create"))],
+)
+async def lookup_ticket(
+    service: ScanServiceDependency,
+    user: CurrentUser,
+    file: Annotated[UploadFile, File(description="Photograph of an existing ticket.")],
+) -> ScanLookupRead:
+    """Find the ticket somebody is holding, to hand it back (Plan 0006 §7.1.1).
+
+    The same reading as `POST /scans`, asked a different question. There the
+    paper is about to *become* a ticket; here it already is one, and the answer
+    is which — the number, the balance and the state, so the counter can settle
+    it without typing anything.
+
+    Nothing is delivered here and nothing is charged: this only identifies. The
+    delivery is still `POST /orders/{id}/deliver`, with its own `orders.deliver`
+    (and `orders.deliver_unpaid` when a balance is left standing).
+
+    Gated on `scans.create` and not on `orders.read`, because what is scarce here
+    is not the ticket but the provider call: it comes out of the same daily
+    budget as capture, and whoever may spend it is the same person.
+
+    Declared **above** `/{scan_id}`: "lookup" is not a UUID, but the path would
+    match it first and answer a validation error instead of a reading.
+
+    Answers 409 for the same three reasons as capture — switched off, cap spent,
+    provider unreachable — and the screen falls back to the search box, which is
+    the path that never needed the network (D8).
+    """
+    return await service.lookup(await file.read(), actor=user)
 
 
 @router.get(
