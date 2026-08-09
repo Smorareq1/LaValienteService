@@ -49,9 +49,11 @@ SERVICES: tuple[SeedService, ...] = (
         "tina",
         None,
         (
-            ("G", "Tina grande", "30.00", None, None),
-            ("E", "Tina estándar", "25.00", None, None),
-            ("P", "Tina pequeña", "20.00", None, None),
+            # El nombre del tamaño solo: la opción se lee bajo el servicio que
+            # ya dice "tina", y repetirlo llena la fila de la boleta de ruido.
+            ("G", "Grande", "30.00", None, None),
+            ("E", "Mediano", "25.00", None, None),
+            ("P", "Pequeño", "20.00", None, None),
         ),
     ),
     (

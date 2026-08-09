@@ -48,7 +48,7 @@ preparado el terreno para las etapas siguientes: cierre diario y venta de invent
 | **NIT** | Identificación tributaria del cliente (el campo impreso como "Factura" en la boleta realmente captura el NIT). |
 | **No. Piezas** | Total de prendas del pedido. **Debe coincidir** con la suma del detalle de prendas. |
 | **Lavado por peso** | Libras × precio por libra (hoy Q2.50/lb). |
-| **Lavado por tina** | Según la cantidad de agua de la tina de la lavadora: **G**rande Q30, **E**stándar Q25, **P**equeña Q20. Puede cobrarse más de una tina. |
+| **Lavado por tina** | Según la cantidad de agua de la tina de la lavadora: **G**rande Q30, m**E**diano Q25, **P**equeño Q20. Puede cobrarse más de una tina. |
 | **Secado** | Por tiempo, base 40 min a temperatura media, en lapsos de 10 min: **T40** Q20, **T50** Q25, **T60** Q30. |
 | **Nivel** (lavado a mano) | Por cantidad de piezas lavadas a mano: **N2** = 1–4 piezas Q5, **N3** = 5–9 Q10, **N4** = 10–13 Q15. |
 | **R — Rins** | Se agregó suavizante. Q10 c/u; puede cobrarse N veces en un pedido (ej. 3 Rins). |
@@ -95,6 +95,13 @@ preparado el terreno para las etapas siguientes: cierre diario y venta de invent
 - **D12 — Los pedidos entregados o anulados son inmutables.** Una corrección posterior se hace
   anulando y recreando, dejando rastro. Antes de eso, la edición depende del estado y del rol
   (ver §7.3).
+- **D13 — `in_progress` y `ready` son contabilidad opcional, no una compuerta.** Entregar se
+  permite desde cualquier estado vivo (§7.2). La operación no marca esos estados a mano: al
+  cierre del día se dice "de los pedidos que tenía, entregué estos" y se anota número de
+  boleta, cliente y cuánto pagó — y eso es a la vez la entrega y el ingreso. Exigir `ready`
+  antes de entregar solo inventaría dos toques que nadie da, y el atajo previsible (pasar por
+  la cadena para desbloquear el botón) llenaría `in_progress`/`ready` de marcas de tiempo que
+  documentan el atajo en vez de la ropa. Lo que cierra una boleta es la entrega.
 
 ## 5. Modelo de datos
 
@@ -370,11 +377,11 @@ descuento adicional = (Q30 + Q30) − Q35 = Q25.00 → total Q83.75.
 ### 7.1 Estados y transiciones
 
 ```
-received ──→ in_progress ──→ ready ──→ delivered   (final)
+received ──→ in_progress ──→ ready        (cadena opcional, con retroceso)
     │             │            │
-    └─────────────┴────────────┘←─ ready → in_progress (retroceso permitido)
-                  ↓
-              cancelled   (final; desde received o in_progress)
+    └─────────────┴────────────┴──→ delivered   (final)
+    │             │
+    └─────────────┴──→ cancelled   (final; motivo obligatorio)
 ```
 
 - `received`: pedido registrado, ropa recibida.
@@ -383,16 +390,26 @@ received ──→ in_progress ──→ ready ──→ delivered   (final)
 - `delivered`: entregado; se registran `quantity_delivered` por prenda y el pago final.
 - `cancelled`: anulado con motivo obligatorio.
 
+**`in_progress` y `ready` son opcionales (D13).** Existen para quien quiera saber qué hay en
+lavado, pero nadie está obligado a marcarlos: la operación real registra las entregas de un
+solo golpe al cierre del día, por número de boleta, contra pedidos que nunca salieron de
+`received`. Entregar es el acto que cierra la boleta, y no exige haber pasado por la cadena.
+
 ### 7.2 Entrega
 
 `POST /orders/{id}/deliver` recibe opcionalmente las cantidades entregadas por prenda (default:
 igual a las recibidas) y opcionalmente el pago final. Reglas:
 
-- Requiere estado `ready`.
+- Se puede entregar desde **cualquier estado vivo** — `received`, `in_progress` o `ready`
+  (`DELIVERABLE_FROM`). Un pedido ya `delivered` o `cancelled` se rechaza.
 - Requiere saldo 0 tras registrar el pago incluido; entregar con saldo pendiente exige el
   permiso `orders.deliver_unpaid` (solo admin — cubre el caso excepcional de fiar).
 - Registra `delivered_at`, `delivered_by_id` y las `quantity_delivered`. Diferencias contra lo
   recibido quedan consultables para el reporte de pérdidas.
+
+La entrada natural de esta operación no es el detalle del pedido sino el lado de **ingresos de
+Caja** ([Plan 0006](../0006-ui-app-fase1/PLAN.md) §7.1): ahí es donde el mostrador anota, boleta
+por boleta, qué entregó y cuánto le pagaron.
 
 ### 7.3 Reglas de edición (D12)
 
@@ -553,3 +570,4 @@ documento propio (no una línea del pedido de lavandería), y ambos alimentarán
 | 2026-08-02 | **PR 4 (ciclo de vida) implementado**: tabla `order_payments` (migración `20260802_0004`), `POST /orders/{id}/status`, `/deliver`, `/cancel` y `/payments`, saldo derivado y el `advance_payment` de §6.1 que el PR 3 había dejado pendiente. Desviaciones y precisiones respecto a lo escrito acá: (a) el diagrama de §7.1 se leyó como **retroceso de un paso desde cualquier estado abierto** (`ready → in_progress` y `in_progress → received`), no solo el que el texto nombra: marcar un pedido por error pasa en un mostrador y deshacerlo no puede exigir un administrador; (b) `delivered` y `cancelled` **no son alcanzables por `/status`** — cada uno tiene su endpoint porque cada uno necesita datos que ese cuerpo no tiene (conteo de prendas, motivo) y porque `/status` solo pide `orders.update`, que todo colaborador tiene; (c) un pago **no puede exceder el saldo**: el vuelto que se da en el mostrador no es un pago, y registrar Q100 contra un pedido de Q75 metería veinticinco quetzales que nunca se quedaron en la caja; (d) anular **no toca el dinero ya cobrado** —devolverlo es un movimiento de caja propio y borrarlo dejaría el cajón corto sin nada a qué apuntar—, así que el reembolso queda pendiente para cuando exista el módulo de caja; (e) un pedido **entregado sigue aceptando pagos**, que es justo como se salda uno fiado con `orders.deliver_unpaid`; (f) `PUT /orders/{id}` y las reglas de edición de §7.3 **no se implementaron**: la fila `ready` de esa tabla distingue colaborador de admin y §9 no define ningún permiso que exprese esa diferencia — inventarlo es una decisión del plan, no de la implementación, y le corresponde al PR 6 ("seeder RBAC definitivo"). Verificado contra Postgres real con 34 comprobaciones: cadena de estados, retroceso, entrega con prenda faltante anotada, fiado, anulación y saldo en la lista. |
 | 2026-08-04 | **PR 5 (`promotions`) implementado**: tabla `promotions` (migración `20260804_0005`), `seed_promotions.py` con las tres del §10, `GET/POST/PATCH /promotions` y la integración con el motor de descuentos. La migración agrega además la clave foránea de `order_discounts.promotion_id` que el PR 3 había dejado pendiente. Desviaciones y precisiones respecto a lo escrito acá: **(a)** una promoción que resuelve a **cero se rechaza con un mensaje**, no se aplica en silencio — §5.4 dice que el descuento nunca es negativo y eso se cumple, pero escribir una línea de Q0 rompe el CHECK `amount > 0` y dejarla caer callada le haría creer al mostrador que aplicó un descuento que el cliente nunca recibió; **(b)** `orders.manual_discount` **solo se exige a los descuentos manuales**: antes lo pedía cualquier lista de descuentos no vacía, y elegir una promoción vigente es trabajo ordinario de mostrador —la decisión ya se tomó al crearla— mientras que digitar un monto sigue siendo del admin (D10); **(c)** el motor recibe **todas** las promociones y no solo las vigentes, para poder distinguir "venció" de "no existe": un pedido capturado offline mientras corría la promo llega al servidor después de que terminó, y el Plan 0004 §8 pide justo ese mensaje; **(d)** `applies_to_service_codes` guarda **códigos y no ids** de servicio, porque una promoción se escribe contra lo que el negocio vende ("50% del domicilio") y el código es el nombre estable de eso; el service rechaza códigos que no existan, que si no el error es mudo —la promo se guarda, aparece y no descuenta nada—; **(e)** la misma promoción dos veces en un pedido se rechaza; **(f)** la descripción de la línea es un **snapshot del nombre** de la promoción (D2), así que renombrarla mañana no reescribe los pedidos de ayer; **(g)** el CHECK `discount_type <> 'percentage' OR value <= 100` vive en el esquema: un 150% le devolvería dinero al cliente. Verificado contra Postgres real con 23 comprobaciones end-to-end, incluido el ejemplo numérico de §6.4 resuelto ahora **por las promociones reales** y no por montos escritos a mano: 116.25 / 7.50 / 108.75, y 83.75 sumando la promo de julio. Falta UI 5 para que se vean en la toma. |
 | 2026-08-04 | **PR 6 (permisos y cierre) implementado**: `PUT /orders/{id}` con las reglas de §7.3, `GET /orders/daily-summary`, el seeder RBAC definitivo, la revisión de índices (migración `20260804_0006`) y la documentación de la API en el README. Desviaciones y precisiones respecto a lo escrito acá: **(a)** §7.3 distingue al colaborador del admin en un pedido `ready` y §9 no definía ningún permiso que lo expresara —era justo lo que el PR 4 dejó pendiente—, así que se estrena **`orders.update_ready`**, admin únicamente; los estados `received` e `in_progress` los edita cualquiera que tome pedidos, y uno entregado o anulado no lo edita nadie; **(b)** el `PUT` **reemplaza y recalcula entero**, contra el catálogo de la fecha *del pedido* y no la de hoy: corregir una boleta del lunes no puede repreciarla con las tarifas del miércoles (D1); **(c)** tres cosas quedan **fuera** del cuerpo editable: la fecha y el correlativo —que son el nombre por el que todos llaman al pedido y pertenecen al día—, el estado —que tiene sus propias puertas— y los pagos, porque el dinero recibido es un hecho que ocurrió y un pago se anula, no se edita; **(d)** una edición que dejaría el total **por debajo de lo ya pagado se rechaza**: eso es una devolución, y las devoluciones son un movimiento de caja que este módulo todavía no sabe registrar; **(e)** las líneas reemplazadas se marcan **borradas y no se eliminan** (migración `20260804_0007`): una fila que desaparece no viaja por ningún feed, así que un dispositivo que ya la había bajado se quedaría mostrando cargos que la boleta ya no tiene —es literal lo que pide el D8 del plan 0004, y la primera versión de este PR lo incumplía—; eso obligó a dos cosas más: que `uq_order_garments_type` pase a ser un índice **parcial** (`WHERE deleted_at IS NULL`), porque si no una boleta que conserva el mismo tipo de prenda choca con la fila que va de salida, y que la respuesta se **relea** con `populate_existing`, porque las lápidas siguen en las colecciones de la sesión; **(f)** en `daily-summary` un pedido anulado **cuenta como pedido pero no como dinero**, salvo lo que ya se le había cobrado, que sigue en el cajón (§7.3) y por eso viaja en `collected` sin restar del `balance`; **(g)** la revisión de índices encontró **uno redundante**: `ix_orders_order_date` no respondía nada que `uq_orders_daily_number (order_date, daily_number)` no respondiera ya por su columna inicial, y costaba una escritura por boleta. Verificado contra Postgres real con 21 comprobaciones end-to-end y 150 tests unitarios. |
+| 2026-08-09 | **Entregar deja de exigir `ready` (D13, §7.1–7.2).** La operación no marca `in_progress` ni `ready` a mano: al cierre del día se anota, por número de boleta, qué se entregó, a quién y cuánto pagó — y ese registro *es* la entrega y el ingreso a la vez. La regla anterior («solo un pedido `ready` puede entregarse») exigía dos toques que nadie da, así que el camino real habría sido pasar por la cadena solo para desbloquear el botón, llenando las marcas de tiempo de datos que documentan el atajo en vez de la ropa. Ahora `deliver` acepta cualquier estado vivo (`DELIVERABLE_FROM` = `received`/`in_progress`/`ready`) y rechaza los finales con «no longer be delivered»; `in_progress` y `ready` quedan como contabilidad **opcional** para quien quiera saber qué hay en lavado. No hubo migración: el enum y la tabla no cambian, solo la guarda del service. `daily_close.OPEN_STATUSES` ya contemplaba los tres estados vivos, así que el cierre no se tocó. Verificado: 401 pruebas de backend en verde (la prueba `test_only_a_ready_order_can_be_delivered` se reemplazó por cuatro: entrega desde `received`, desde `in_progress`, y rechazo desde `delivered` y `cancelled`). |

@@ -253,11 +253,42 @@ class TestDelivery:
                 actor=an_actor(),
             )
 
-    async def test_only_a_ready_order_can_be_delivered(self) -> None:
+    async def test_a_ticket_that_never_left_received_can_be_delivered(self) -> None:
+        """§7.2: the ordinary day. Nobody walked it through the chain.
+
+        This is how the counter actually works — the deliveries are registered
+        in one pass at closing time — so it must not need two taps first.
+        """
+        order = an_order(status=OrderStatus.RECEIVED, paid=Decimal("100.00"))
+        service, repository = build_service(order)
+
+        await service.deliver(order.id, OrderDeliver(), actor=an_actor())
+
+        assert order.status is OrderStatus.DELIVERED
+        assert repository.commits == 1
+
+    async def test_it_can_also_be_delivered_straight_from_in_progress(self) -> None:
         order = an_order(status=OrderStatus.IN_PROGRESS, paid=Decimal("100.00"))
         service, _ = build_service(order)
 
-        with pytest.raises(ConflictError, match="'ready'"):
+        await service.deliver(order.id, OrderDeliver(), actor=an_actor())
+
+        assert order.status is OrderStatus.DELIVERED
+
+    async def test_a_delivered_ticket_cannot_be_delivered_again(self) -> None:
+        """Two taps on the same booklet, or a device re-sending an operation."""
+        order = an_order(status=OrderStatus.DELIVERED, paid=Decimal("100.00"))
+        service, repository = build_service(order)
+
+        with pytest.raises(ConflictError, match="no longer be delivered"):
+            await service.deliver(order.id, OrderDeliver(), actor=an_actor())
+        assert repository.commits == 0
+
+    async def test_a_cancelled_ticket_cannot_be_delivered(self) -> None:
+        order = an_order(status=OrderStatus.CANCELLED, paid=Decimal("100.00"))
+        service, _ = build_service(order)
+
+        with pytest.raises(ConflictError, match="no longer be delivered"):
             await service.deliver(order.id, OrderDeliver(), actor=an_actor())
 
     async def test_the_payment_that_settles_it_rides_along(self) -> None:

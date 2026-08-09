@@ -66,6 +66,20 @@ CANCELLABLE_FROM: frozenset[OrderStatus] = frozenset(
     {OrderStatus.RECEIVED, OrderStatus.IN_PROGRESS}
 )
 
+#: Handing the clothes back is possible from any state where the laundry still
+#: has them — the chain above is optional bookkeeping, not a gate.
+#:
+#: The counter marks `in_progress` and `ready` when knowing what is in the wash
+#: helps them, and on an ordinary day it does not: the delivery is registered in
+#: one pass at closing time, by booklet number, against tickets that never left
+#: `received`. Requiring `ready` first would only invent two taps nobody takes,
+#: and the workaround — tapping through the chain to unlock the button — would
+#: fill the column with timestamps that record the workaround rather than the
+#: laundry. What closes a ticket is the delivery itself.
+DELIVERABLE_FROM: frozenset[OrderStatus] = frozenset(
+    {OrderStatus.RECEIVED, OrderStatus.IN_PROGRESS, OrderStatus.READY}
+)
+
 
 class PaymentMethod(enum.StrEnum):
     CASH = "cash"

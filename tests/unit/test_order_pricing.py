@@ -65,7 +65,7 @@ def catalog() -> tuple[list[ServiceType], list[ServicePrice]]:
         "wash_tub",
         "Lavado por tina",
         PricingMode.TIERED,
-        [("G", "Tina grande", None, None), ("E", "Tina estándar", None, None)],
+        [("G", "Grande", None, None), ("E", "Mediano", None, None)],
     )
     dry = service(
         "dry",

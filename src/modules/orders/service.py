@@ -18,6 +18,7 @@ from src.modules.identity.service import IdentityService
 from src.modules.orders.models import (
     ALLOWED_TRANSITIONS,
     CANCELLABLE_FROM,
+    DELIVERABLE_FROM,
     Order,
     OrderCharge,
     OrderDiscount,
@@ -539,11 +540,16 @@ class OrdersService:
         return order
 
     async def deliver(self, order_id: UUID, data: OrderDeliver, *, actor: User) -> Order:
-        """Hand the laundry back and close the ticket (§7.2)."""
+        """Hand the laundry back and close the ticket (§7.2).
+
+        Any live state will do (`DELIVERABLE_FROM`): the counter registers the
+        day's deliveries in one pass against tickets that are still `received`,
+        and the intermediate marks are theirs to use or skip.
+        """
         order = await self.get(order_id)
-        if order.status is not OrderStatus.READY:
+        if order.status not in DELIVERABLE_FROM:
             raise ConflictError(
-                f"Only an order that is 'ready' can be delivered; this one is '{order.status}'."
+                f"An order that is '{order.status}' can no longer be delivered."
             )
         # Today's lock, not the ticket's: clothes taken on Monday are still handed
         # back on Wednesday after Monday is closed. What this would change is

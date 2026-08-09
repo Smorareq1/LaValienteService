@@ -176,6 +176,15 @@ edición.
 | Cobro final | Colapsable: monto (default = saldo), método (Efectivo/Transferencia), referencia si transferencia | |
 | Confirmar entrega | Botón primario; si queda saldo > 0 exige permiso `orders.deliver_unpaid` (si no lo tiene: aviso "solo un admin puede entregar con saldo") | `POST /orders/{id}/deliver` |
 
+Hay **dos entradas a la misma operación** y ninguna es un atajo de la otra:
+
+- **Caja → Entregas y cobros** (§7.1.1) es el camino ordinario y el de volumen: boleta,
+  cliente, cuánto pagó. Asume que la ropa vuelve completa, que es el caso normal.
+- **Esta pantalla** es la del caso que necesita detalle: conciliar prendas cuando falta
+  algo. Se llega desde el detalle del pedido, o desde la hoja de Caja con "revisar prendas".
+
+Entregar **no exige** que el pedido esté `ready` (Plan 0001 D13): sirve desde `received`.
+
 ### 5.6 Registrar pago (modal)
 
 Monto (default = saldo) · método segmented · referencia (solo transferencia) · saldo
@@ -214,13 +223,40 @@ acumulado si existe · acciones: **Editar**, **Archivar** (admin, con confirmaci
 **Propósito:** replicar la hoja física: ingresos a la izquierda, gastos a la derecha,
 total del día — aquí como resumen + dos tabs.
 
+El lado de ingresos **no es un informe de lo ya cobrado: es donde se registra**. La entrega
+de un pedido y su cobro son un solo acto y ocurren acá, por número de boleta (§7.1.1). Esa
+es la razón de que la pantalla se lea como el Registro Diario: en el papel, la columna de
+ingresos es lo que la persona *escribe*, no lo que le informan.
+
 | Elemento | Contenido | Fuente |
 |---|---|---|
 | Selector de fecha | Default hoy; fechas pasadas en solo lectura si están cerradas (candado visible) | |
 | Resumen | **Ingresos · Gastos · Neto** en vivo + desglose efectivo/transferencia | `GET /daily-close/preview?date=` (offline: cálculo local) |
-| **Tab Ingresos** | Lista unificada del día: pagos de pedidos (hora, # pedido, cliente, monto, ícono método) y ventas de insumos (badge "Insumo" — el azul de la hoja). Transferencias con marca visual (el rosado de la hoja) | pagos + ventas del día |
+| **Entregas y cobros** | Bloque de captura, encima de los tabs (§7.1.1) | pedidos vivos del día en BD local |
+| **Tab Ingresos** | Lista unificada del día: pagos de pedidos (hora, # boleta, cliente, monto, ícono método) y ventas de insumos (badge "Insumo" — el azul de la hoja). Transferencias con marca visual (el rosado de la hoja). Badge de procedencia **Escaneada / A mano** | pagos + ventas del día |
 | **Tab Gastos** | Lista: chip de categoría, concepto, monto, badge "Pendiente" si `status=pending`; total al pie | `GET /expenses?date=` |
-| Acciones | **+ Gasto** (§7.2) · **+ Venta de insumo** (§7.3) · **Cerrar día** (§7.4, admin, deshabilitado offline con hint "requiere conexión") | |
+| Acciones | **Buscar boleta** · **Escanear boleta** (§7.1.1) · **+ Gasto** (§7.2) · **+ Venta de insumo** (§7.3) · **Cerrar día** (§7.4, admin, deshabilitado offline con hint "requiere conexión") | |
+
+#### 7.1.1 Entregas y cobros — el registro del ingreso
+
+Cómo trabaja el mostrador hoy: nadie marca «en proceso» ni «listo». Al cierre del día se
+dice *"de los pedidos que tenía, entregué estos"* y se anota **número de boleta, cliente y
+cuánto pagó**. Eso marca el pedido como entregado y mete el dinero en la caja, de una vez.
+Escanear la boleta automatiza exactamente ese acto — no es otro camino, es el mismo sin
+teclear. El backend lo permite desde el Plan 0001 D13: entregar ya no exige `ready`.
+
+| Elemento | Control | Notas |
+|---|---|---|
+| Buscador | Campo de búsqueda por **No. de boleta** o cliente, con botón de escanear al lado | BD local; es el camino que siempre funciona |
+| Lista de boletas abiertas | Filas con casilla: # boleta, cliente, prendas, anticipo, **saldo**. Sin filtrar por estado — abierta = no entregada ni anulada | `status ∈ {received, in_progress, ready}` |
+| Marcado múltiple | Al marcar ≥ 1 aparece la franja "N boletas marcadas · Q…" → **Registrar** | El repaso del final del día es lote, no una por una |
+| Hoja de una boleta | Total, anticipos, **saldo**; ¿cuánto pagó? (**Pagó todo** / **Pagó una parte** con monto); **¿cómo pagó?** (Efectivo / Transferencia / Tarjeta) | Idéntica venga del escáner, del buscador o de la lista |
+| Hoja de lote | Las boletas marcadas, cada una con su monto editable y su método; **Entra a caja Q…**; aviso de lo que queda a deber | Un solo `POST` por boleta (u op offline) |
+| Confirmar | **Cobrar y entregar** / **Entregar con saldo** (§5.5: con saldo > 0 exige `orders.deliver_unpaid`) | `POST /orders/{id}/deliver` con `payment` |
+| Sin conexión | El escaneo se deshabilita con "necesita conexión" (Plan 0003 D8) y el buscador queda como camino principal | La captura manual nunca puede depender de la red |
+
+Lo no marcado no se toca: esas boletas siguen abiertas mañana con su saldo, y el cierre las
+reporta como advertencia (§7.4) sin anularlas.
 
 ### 7.2 Nuevo gasto (bottom sheet)
 
@@ -399,7 +435,7 @@ descartar duplicado · ver el pedido existente · pedir a un admin. Nada desapar
 | Editar pedido en estado `ready` | solo estado/pagos | ✔ |
 | Clientes: lista, detalle, crear, editar | ✔ | ✔ |
 | Archivar cliente | ✖ | ✔ |
-| Caja: ver día, + gasto, + venta de insumo | ✔ | ✔ |
+| Caja: ver día, registrar entregas y cobros (§7.1.1), + gasto, + venta de insumo | ✔ | ✔ |
 | Editar/anular gasto · cancelar venta de insumo | ✖ | ✔ |
 | Cerrar / reabrir día · histórico de cierres | ✖ | ✔ |
 | Insumos: ver productos, lotes, kardex | ✔ | ✔ |
@@ -543,6 +579,7 @@ porque lo que se descartó explica el alcance tanto como lo que se tomó.
 | Fecha | Cambio |
 |---|---|
 | 2026-07-27 | Versión inicial: mapa de navegación de 5 tabs, especificación de pantallas de todos los módulos de la fase 1 (pedidos, clientes, caja, insumos, personal, catálogo, sync, ajustes), matriz pantalla × rol, estados transversales, inventario de componentes del design system y orden de implementación alineado a los PRs de backend. |
+| 2026-08-09 | **El lado de ingresos de Caja pasa de informe a superficie de captura (§7.1, §7.1.1 nueva).** La versión inicial especificaba el *Tab Ingresos* como "lista unificada del día" y dejaba la entrega solo en `/orders/:id/deliver`, alcanzable desde el detalle del pedido. Eso no describe a la operación: el mostrador no navega pedido por pedido ni marca estados intermedios — al cierre anota, por número de boleta, qué entregó y cuánto le pagaron, y ese registro es la entrega *y* el ingreso. Ahora §7.1.1 especifica el bloque de captura (buscador por No. de boleta con escáner al lado, lista de boletas abiertas con marcado múltiple, hoja de una boleta y hoja de lote), §5.5 aclara que hay dos entradas a la misma operación y que ninguna exige `ready` (Plan 0001 D13), y la matriz de §13 nombra la capacidad. Dos huecos que salieron al revisarlo: la hoja de cobro **no preguntaba el método de pago** aunque el resumen del día separa efectivo/transferencia/tarjeta —sin eso el arqueo no cuadra—, y el camino manual estaba subordinado al escáner, que es **online-only** (Plan 0003 D8): ahora el buscador es el camino principal y el escáner el acelerador. Maqueta `Caja del día.dc.html` actualizada en consecuencia. |
 | 2026-08-02 | §13 aclarada: la visibilidad por rol se resuelve con el permiso comodín `*.*` para `admin`/`system_admin` y con `denied_permissions` viajando al cliente, no con nombres de rol en la UI. El seeder pasó a sembrar también los permisos del Plan 0005 (`expenses`, `inventory`, `staff`, `attendance`, `daily_close`), sin los cuales la matriz no se podía expresar y un colaborador no veía ni Caja ni Insumos ni Personal. Guard del router extendido a `/inventory`, `/staff`, `/catalog`, `/promotions` y `/cash/history`: ocultar el destino no basta si un deep link entra igual. |
 | 2026-08-02 | **UI 2 implementada**: lista (§6.1), detalle (§6.2) y formulario en sheet (§6.3) de clientes, todo contra la BD local. Dos notas sobre lo que el plan pedía y no se pudo dar tal cual: los pedidos recientes y el saldo del §6.2 no tienen fuente hasta UI 4, así que esa sección va con estado vacío que lo dice en vez de quedar omitida; y **archivar dejó de ser un `update` con `is_active: false`**, porque el §13 lo reserva al admin y como update el servidor le habría exigido `customers.update`, que todo colaborador tiene — ahora viaja como operación `customer.archive` con su propio permiso. Del §15 se construyeron `AppSearchField` y `AppConfirmDialog`. |
 | 2026-08-03 | **UI 3 implementada**: la toma de pedido (§5.2) completa, con cálculo local en vivo, contra la BD local. Las desviaciones campo a campo quedan anotadas en el [Plan 0002](../0002-ui-toma-pedido/PLAN.md); aquí importan tres cosas del mapa. La ruta `/orders/new` **no cuelga del shell** sino del nivel superior, porque el footer con el TOTAL ocupa el sitio de la barra de cinco destinos; el guard la protege con `orders.create` **además** del `orders.read` que hereda de `/orders`. Del §15 se construyeron `AppSegmented`, `AppSummaryBar` y `AppDateField`, y `AppTextField`/`AppFormField` ganaron `inputFormatters` para que un campo de dinero no acepte lo que después habría que rechazar con un mensaje. Queda pendiente de UI 4 el único punto de entrada que el plan pide y todavía no existe: el FAB de la lista de pedidos (§5.1); por ahora se llega desde la acción rápida de Inicio. |
