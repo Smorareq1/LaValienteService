@@ -2,7 +2,7 @@ from uuid import UUID
 
 from fastapi import APIRouter, Depends, status
 
-from src.api.dependencies import IdentityServiceDependency, require_permission
+from src.api.dependencies import CurrentUser, IdentityServiceDependency, require_permission
 from src.modules.identity.schemas import (
     PermissionCreate,
     PermissionRead,
@@ -11,6 +11,7 @@ from src.modules.identity.schemas import (
     RoleRead,
     UserPermissionReplace,
     UserRoleReplace,
+    UserStatusUpdate,
     UserSummaryRead,
 )
 
@@ -79,6 +80,21 @@ async def replace_role_permissions(
     role_id: UUID, data: RolePermissionReplace, service: IdentityServiceDependency
 ) -> None:
     await service.replace_role_permissions(role_id, data.permission_ids)
+
+
+@router.patch(
+    "/users/{user_id}",
+    response_model=UserSummaryRead,
+    dependencies=[Depends(require_permission("authorization.users.manage"))],
+)
+async def set_user_status(
+    user_id: UUID,
+    data: UserStatusUpdate,
+    current_user: CurrentUser,
+    service: IdentityServiceDependency,
+) -> UserSummaryRead:
+    """Turn an account on or off. Accounts are never deleted (Plan 0006 §12)."""
+    return await service.set_user_active(current_user, user_id, data.is_active)
 
 
 @router.put(

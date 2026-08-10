@@ -10,6 +10,13 @@ services:
       DATABASE_URL: postgresql+asyncpg://${POSTGRES_USER:-lavaliente}:${POSTGRES_PASSWORD:?Define POSTGRES_PASSWORD}@postgres:5432/${POSTGRES_DB:-lavaliente}
       JWT_SECRET_KEY: ${JWT_SECRET_KEY:?Define JWT_SECRET_KEY}
       ENVIRONMENT: development
+      # Escaneo de boleta (Plan 0003). Sin key el módulo se queda apagado y la
+      # captura a mano sigue entera (D8), así que no lleva `:?`: un despliegue
+      # sin Gemini es un despliegue válido.
+      SCAN_ENABLED: ${SCAN_ENABLED:-false}
+      GEMINI_API_KEY: ${GEMINI_API_KEY:-}
+      SCAN_MODEL: ${SCAN_MODEL:-gemini-2.5-flash}
+      SCAN_STORAGE_PATH: ${SCAN_STORAGE_PATH:-./media/scans}
     volumes:
       - .:/app
     ports:

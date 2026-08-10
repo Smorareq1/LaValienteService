@@ -1,0 +1,69 @@
+# La imagen de producción corriendo en tu máquina, para probarla antes de que
+# la pruebe un cliente. No es "el compose de producción": en Railway no se usa
+# este archivo — la base de datos la administra Railway y la API la construye
+# desde `docker/Dockerfile`. Esto existe porque el `Dockerfile.dev` no responde
+# la pregunta que importa el día del despliegue: ¿arranca la imagen sin Poetry,
+# sin las dependencias de desarrollo, sin montar el código y sin privilegios?
+#
+#   docker compose -f docker-compose.prod.yml build
+#   docker compose -f docker-compose.prod.yml run --rm api migrate
+#   docker compose -f docker-compose.prod.yml run --rm api seed
+#   docker compose -f docker-compose.prod.yml up
+#
+# Antes define `POSTGRES_PASSWORD` y `JWT_SECRET_KEY` en tu entorno, igual que
+# en el compose de desarrollo.
+
+name: lavaliente-prod
+
+services:
+  api:
+    build:
+      context: .
+      dockerfile: docker/Dockerfile
+    environment:
+      DATABASE_URL: postgresql+asyncpg://${POSTGRES_USER:-lavaliente}:${POSTGRES_PASSWORD:?Define POSTGRES_PASSWORD}@postgres:5432/${POSTGRES_DB:-lavaliente}
+      JWT_SECRET_KEY: ${JWT_SECRET_KEY:?Define JWT_SECRET_KEY}
+      ENVIRONMENT: production
+      # Un worker es lo que corresponde a un contenedor: se escala con réplicas,
+      # no con procesos dentro de la caja, y cada worker abre su propio pool de
+      # conexiones contra Postgres.
+      WEB_CONCURRENCY: ${WEB_CONCURRENCY:-1}
+      # Escaneo de boleta (Plan 0003). Apagado por omisión: sin key el módulo se
+      # queda dormido y la captura a mano sigue entera (D8).
+      SCAN_ENABLED: ${SCAN_ENABLED:-false}
+      GEMINI_API_KEY: ${GEMINI_API_KEY:-}
+      SCAN_MODEL: ${SCAN_MODEL:-gemini-2.5-flash}
+    volumes:
+      # Montado en `/data` y no en `./media`: reproduce el volumen de Railway,
+      # incluyendo que llega con dueño root. Si el `chown` del entrypoint se
+      # rompe, se rompe aquí y no en producción.
+      - media_data:/data
+    ports:
+      - "8000:8000"
+    depends_on:
+      postgres:
+        condition: service_healthy
+
+  postgres:
+    image: postgres:18.4-alpine
+    environment:
+      POSTGRES_USER: ${POSTGRES_USER:-lavaliente}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?Define POSTGRES_PASSWORD}
+      POSTGRES_DB: ${POSTGRES_DB:-lavaliente}
+      PGDATA: /var/lib/postgresql/18/docker
+    ports:
+      # 5434 para no pelear ni con una instalación local (5432) ni con el
+      # compose de desarrollo (5433): los tres pueden estar arriba a la vez.
+      - "5434:5432"
+    volumes:
+      - postgres_data:/var/lib/postgresql
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U $$POSTGRES_USER -d $$POSTGRES_DB"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+      start_period: 10s
+
+volumes:
+  postgres_data:
+  media_data:
