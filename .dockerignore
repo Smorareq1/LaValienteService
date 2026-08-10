@@ -1,10 +1,36 @@
+# El Dockerfile de producción copia rutas explícitas, así que esto no es la
+# última línea de defensa sino la primera: mantiene el contexto pequeño (cada
+# build lo sube entero al motor) y evita reconstruir por un cambio de
+# documentación.
+
 .git
+.gitattributes
+.github
+.gitignore
+.dockerignore
+
 .venv
 __pycache__
+*.py[cod]
 .pytest_cache
 .mypy_cache
 .ruff_cache
 .coverage
 htmlcov
+dist
+build
+*.egg-info
+
+# Secretos y datos de personas: nunca dentro de una imagen. `media/` son fotos
+# de productos y de boletas con nombre, teléfono y NIT escritos a mano.
+.env
+.env.*
+media
+dev
+
+# `README.md` sí entra: `pyproject.toml` lo declara y Poetry lo lee al resolver.
 docs
 tests
+docker-compose*.yml
+ruff.toml
+dev/

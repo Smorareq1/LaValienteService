@@ -45,6 +45,12 @@ from src.modules.identity.schemas import (
     UserSummaryRead,
 )
 
+#: Permission code that stands for "everything". A role holding it passes every
+#: check, which is what keeps an administrator from silently losing access to a
+#: module the day it ships: new permissions do not have to be granted one by one.
+#: An explicit per-user `deny` still wins over it — see `has_permission`.
+WILDCARD_PERMISSION = "*.*"
+
 
 class IdentityService:
     """Use cases for login, password recovery, and dynamic role-based authorization."""
@@ -212,8 +218,8 @@ class IdentityService:
             raise AuthenticationError("Session is invalid or revoked.")
         return user, session_id
 
-    @staticmethod
-    def effective_permissions(user: User) -> set[str]:
+    @classmethod
+    def effective_permissions(cls, user: User) -> set[str]:
         role_permissions = {
             assignment.permission.code
             for user_role in user.role_assignments
@@ -224,14 +230,27 @@ class IdentityService:
             for assignment in user.permission_assignments
             if assignment.effect is PermissionEffect.GRANT
         }
-        denials = {
+        return (role_permissions | grants) - cls.denied_permissions(user)
+
+    @staticmethod
+    def denied_permissions(user: User) -> set[str]:
+        """Codes revoked from this user by hand, whatever their roles grant."""
+        return {
             assignment.permission.code
             for assignment in user.permission_assignments
             if assignment.effect is PermissionEffect.DENY
         }
-        return (role_permissions | grants) - denials
+
+    def has_permission(self, user: User, permission_code: str) -> bool:
+        if permission_code in self.denied_permissions(user):
+            return False
+        granted = self.effective_permissions(user)
+        return permission_code in granted or WILDCARD_PERMISSION in granted
 
     def current_user_view(self, user: User) -> CurrentUserRead:
+        # The app decides what to *show* with the same two lists the server uses
+        # to decide what to *allow*, so a section can never appear for someone the
+        # API would turn away.
         return CurrentUserRead(
             id=user.id,
             username=user.username,
@@ -239,24 +258,53 @@ class IdentityService:
             full_name=user.full_name,
             roles=sorted(assignment.role.code for assignment in user.role_assignments),
             permissions=sorted(self.effective_permissions(user)),
+            denied_permissions=sorted(self.denied_permissions(user)),
         )
 
     async def list_users(self) -> list[UserSummaryRead]:
         users = await self.repository.list_users()
-        return [
-            UserSummaryRead(
-                id=user.id,
-                username=user.username,
-                email=user.email,
-                full_name=user.full_name,
-                is_active=user.is_active,
-                roles=sorted(assignment.role.code for assignment in user.role_assignments),
-            )
-            for user in users
-        ]
+        return [self.user_summary_view(user) for user in users]
+
+    @staticmethod
+    def user_summary_view(user: User) -> UserSummaryRead:
+        return UserSummaryRead(
+            id=user.id,
+            username=user.username,
+            email=user.email,
+            full_name=user.full_name,
+            is_active=user.is_active,
+            roles=sorted(assignment.role.code for assignment in user.role_assignments),
+        )
+
+    async def set_user_active(self, actor: User, user_id: UUID, is_active: bool) -> UserSummaryRead:
+        """Turn an account on or off. The row stays; the history keeps pointing at it.
+
+        Accounts are never deleted, which is why this exists at all: a ticket
+        taken last March names whoever received it, and dropping the row would
+        turn that audit line into a dangling id.
+
+        Two things happen on the way out. The account cannot be *its own* target
+        — an administrator who switches themselves off is locked out of the
+        screen that would switch them back on, and the only way back would be the
+        script this screen exists to replace. And the sessions are revoked:
+        `authenticate_access_token` already refuses an inactive user, so that is
+        not what closes the door, but a refresh token left alive would outlive
+        the decision and resurrect a session the day the account is turned back
+        on.
+        """
+        user = await self.repository.get_user_with_access(user_id)
+        if user is None:
+            raise NotFoundError("User not found.")
+        if user.id == actor.id and not is_active:
+            raise ConflictError("An account cannot deactivate itself.")
+        user.is_active = is_active
+        if not is_active:
+            await self.repository.revoke_all_sessions(user.id)
+        await self.repository.commit()
+        return self.user_summary_view(user)
 
     def ensure_permission(self, user: User, permission_code: str) -> None:
-        if permission_code not in self.effective_permissions(user):
+        if not self.has_permission(user, permission_code):
             raise AuthorizationError("The account lacks the required permission.")
 
     async def create_permission(self, data: PermissionCreate) -> Permission:

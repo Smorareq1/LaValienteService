@@ -1,4 +1,5 @@
 from collections.abc import AsyncGenerator
+from typing import Any, ClassVar
 
 from sqlalchemy import MetaData
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_async_engine
@@ -17,6 +18,18 @@ NAMING_CONVENTION = {
 
 class Base(DeclarativeBase):
     metadata = MetaData(naming_convention=NAMING_CONVENTION)
+
+    #: Fetch server-generated values (``server_default``, ``onupdate``) in the
+    #: same statement, with ``RETURNING``, instead of leaving the attribute
+    #: expired for a later SELECT.
+    #:
+    #: Under an async session that later SELECT is not a small cost but a crash:
+    #: it happens outside the greenlet SQLAlchemy needs, and raises
+    #: ``MissingGreenlet``. Every model here has an ``updated_at`` that the
+    #: database fills on write and a response schema that reads it right after
+    #: committing, so this belongs on the base and not on each model that
+    #: remembers to ask.
+    __mapper_args__: ClassVar[dict[str, Any]] = {"eager_defaults": True}
 
 
 settings = get_settings()

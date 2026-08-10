@@ -7,7 +7,22 @@ from sqlalchemy import engine_from_config, pool
 
 from src.core.config import get_settings
 from src.core.database import Base
-from src.modules.identity import models  # noqa: F401 -- imports ORM metadata
+
+# The module imports below are for their side effect: every module has to
+# register its tables on `Base.metadata` before autogenerate compares it against
+# the database, or the comparison reads as "drop everything that is not
+# identity".
+from src.modules.catalog import models as catalog_models  # noqa: F401
+from src.modules.customers import models as customers_models  # noqa: F401
+from src.modules.daily_close import models as daily_close_models  # noqa: F401
+from src.modules.expenses import models as expenses_models  # noqa: F401
+from src.modules.identity import models as identity_models  # noqa: F401
+from src.modules.intake_scan import models as intake_scan_models  # noqa: F401
+from src.modules.inventory import models as inventory_models  # noqa: F401
+from src.modules.orders import models as orders_models  # noqa: F401
+from src.modules.promotions import models as promotions_models  # noqa: F401
+from src.modules.staff import models as staff_models  # noqa: F401
+from src.modules.sync import models as sync_models  # noqa: F401
 
 config = context.config
 if config.config_file_name is not None:

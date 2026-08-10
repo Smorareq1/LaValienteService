@@ -1,0 +1,8 @@
+# Los scripts que corren dentro de un contenedor Linux se guardan con finales
+# LF pase lo que pase. Con CRLF, el kernel busca un intérprete llamado
+# "/bin/sh\r" y el contenedor muere con un "no such file or directory" que no
+# menciona el verdadero problema — y en un checkout de Windows eso pasa solo.
+*.sh text eol=lf
+Dockerfile* text eol=lf
+*.yml text eol=lf
+*.yaml text eol=lf
