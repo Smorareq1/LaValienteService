@@ -74,7 +74,7 @@ class TestTheCatalogCoversTheCode:
         assert not orphans, f"catalogued but checked nowhere in src/: {orphans}"
 
     def test_a_code_outside_the_catalog_is_refused(self) -> None:
-        with pytest.raises(ValueError, match="expenses.raed"):
+        with pytest.raises(ValueError, match=re.escape("expenses.raed")):
             ensure_catalogued("expenses.raed")
 
 

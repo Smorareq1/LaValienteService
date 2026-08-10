@@ -65,7 +65,9 @@ class CustomersRepository:
         return items, total or 0
 
     async def get(self, customer_id: UUID) -> Customer | None:
-        statement = select(Customer).where(Customer.id == customer_id, Customer.deleted_at.is_(None))
+        statement = select(Customer).where(
+            Customer.id == customer_id, Customer.deleted_at.is_(None)
+        )
         customer: Customer | None = await self.session.scalar(statement)
         return customer
 

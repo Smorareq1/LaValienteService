@@ -38,7 +38,7 @@ class OrderDiscountCreate(BaseModel):
     amount: Decimal | None = Field(default=None, gt=0, le=Decimal("99999999.99"))
 
     @model_validator(mode="after")
-    def _is_one_or_the_other(self) -> "OrderDiscountCreate":
+    def _is_one_or_the_other(self) -> OrderDiscountCreate:
         if self.promotion_code is not None:
             if self.description is not None or self.amount is not None:
                 raise ValueError(
@@ -109,7 +109,7 @@ class OrderCreate(BaseModel):
     scan_id: UUID | None = None
 
     @model_validator(mode="after")
-    def _needs_exactly_one_customer(self) -> "OrderCreate":
+    def _needs_exactly_one_customer(self) -> OrderCreate:
         if (self.customer_id is None) == (self.customer is None):
             raise ValueError("Send either customer_id or customer, not both and not neither.")
         return self

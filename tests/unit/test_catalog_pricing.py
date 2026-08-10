@@ -78,16 +78,16 @@ class FakeCatalogRepository:
         self.added: list[object] = []
         self.committed = False
 
-    async def get_service_type(self, service_type_id):  # noqa: ANN001, ANN201
+    async def get_service_type(self, service_type_id):
         return self.service_type if service_type_id == self.service_type.id else None
 
-    async def get_service_option(self, option_id):  # noqa: ANN001, ANN201
+    async def get_service_option(self, option_id):
         for option in self.service_type.options:
             if option.id == option_id:
                 return option
         return None
 
-    async def get_open_price(self, service_type_id, service_option_id):  # noqa: ANN001, ANN201
+    async def get_open_price(self, service_type_id, service_option_id):
         return self.open_price
 
     def add(self, instance: object) -> None:

@@ -386,7 +386,7 @@ class TestSelling:
             await service.create_sale(sale_of(product, "1.00"), actor=ACTOR)
 
     async def test_an_unknown_product_is_not_found(self) -> None:
-        service, repository = make_service()
+        service, _repository = make_service()
         ghost = Product(name="Fantasma", unit="bote")
         ghost.id = uuid4()
 

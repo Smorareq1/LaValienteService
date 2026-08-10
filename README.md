@@ -3,7 +3,8 @@
 Backend de La Valiente, construido con FastAPI, PostgreSQL, SQLAlchemy async y Alembic.
 
 Documentación: [API v1](docs/API.md) · [Arquitectura](docs/ARCHITECTURE.md) ·
-[Identidad y acceso](docs/IDENTITY_AND_ACCESS.md) · [Planes](docs/plans/README.md).
+[Identidad y acceso](docs/IDENTITY_AND_ACCESS.md) · [Despliegue](docs/DEPLOYMENT.md) ·
+[Planes](docs/plans/README.md).
 Con el servidor corriendo, el detalle por ruta está en `/docs`.
 
 ## Desarrollo
@@ -51,12 +52,18 @@ módulo nuevo no los deja fuera hasta que alguien recuerde otorgarles su permiso
 asignado a una persona en concreto le gana al comodín. Ese es el mecanismo con el que la
 app decide qué secciones dibuja: pregunta por permisos, nunca por el nombre del rol.
 
-Después de aplicar las migraciones, crea el primer administrador con variables de entorno
-`BOOTSTRAP_ADMIN_EMAIL` y `BOOTSTRAP_ADMIN_PASSWORD`:
+Después de aplicar las migraciones, crea el primer administrador. Ninguna variable tiene valor
+por omisión —un usuario y contraseña por defecto son una credencial publicada el día que la API
+tiene URL pública, y esta cuenta es la que puede otorgar cualquier permiso—, así que el script
+se niega a correr sin ellas:
 
 ```bash
+BOOTSTRAP_ADMIN_USERNAME=... BOOTSTRAP_ADMIN_PASSWORD=... \
 poetry run python -m scripts.create_superuser
 ```
+
+`BOOTSTRAP_ADMIN_EMAIL` y `BOOTSTRAP_ADMIN_PHONE` son opcionales. La contraseña necesita 8
+caracteres o más.
 
 El script crea (si no existen) el rol de sistema `system_admin` y los permisos administrativos
 necesarios. Los permisos y roles posteriores se administran por API.
@@ -193,3 +200,23 @@ docker compose -f docker-compose.dev.yml up --build
 
 Esto no ejecuta Alembic. Cuando decidas aplicar las migraciones, hazlo explícitamente desde el
 contenedor `api` con `poetry run alembic upgrade head`.
+
+## Despliegue
+
+`docker/Dockerfile` es la imagen de producción, y es la misma que corre en staging: si lo que se
+prueba no es el binario que se despliega, staging deja de responder la única pregunta para la que
+existe. Entre entornos cambian las variables, no el Dockerfile.
+
+Antes de subir nada, esa imagen se prueba en tu máquina con `docker-compose.prod.yml`, que no es
+"el compose de producción" —en Railway la base la administra Railway— sino la forma de verificar
+que la imagen arranca sin Poetry, sin dependencias de desarrollo, sin el código montado y sin
+privilegios:
+
+```bash
+docker compose -f docker-compose.prod.yml build
+docker compose -f docker-compose.prod.yml run --rm api migrate
+docker compose -f docker-compose.prod.yml up
+```
+
+El resto —crear el proyecto, el volumen, las variables, los seeders y el primer administrador—
+está en [Despliegue](docs/DEPLOYMENT.md).

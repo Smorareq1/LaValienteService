@@ -1,8 +1,15 @@
 """Create the initial system administrator after migrations have been applied.
 
-Defaults create the first user requested for the project; override with
-BOOTSTRAP_ADMIN_USERNAME / BOOTSTRAP_ADMIN_PASSWORD / BOOTSTRAP_ADMIN_EMAIL /
-BOOTSTRAP_ADMIN_PHONE.
+Everything comes from the environment and nothing has a default:
+
+    BOOTSTRAP_ADMIN_USERNAME   required
+    BOOTSTRAP_ADMIN_PASSWORD   required, 8 characters or more
+    BOOTSTRAP_ADMIN_EMAIL      optional
+    BOOTSTRAP_ADMIN_PHONE      optional
+
+A default username with a default password is a published credential the day the
+API gets a public URL, and this script creates precisely the account that can
+grant every permission there is. Better that it refuses to run.
 """
 
 import asyncio
@@ -22,10 +29,10 @@ ADMIN_PERMISSIONS = (
 
 
 async def create_superuser() -> None:
-    username = os.environ.get("BOOTSTRAP_ADMIN_USERNAME", "sebasm").strip().lower()
-    password = os.environ.get("BOOTSTRAP_ADMIN_PASSWORD", "Morales1")
-    email = os.environ.get("BOOTSTRAP_ADMIN_EMAIL", "smorareq1@gmail.com").strip().lower() or None
-    phone = os.environ.get("BOOTSTRAP_ADMIN_PHONE", "+50248152964").strip() or None
+    username = os.environ.get("BOOTSTRAP_ADMIN_USERNAME", "").strip().lower()
+    password = os.environ.get("BOOTSTRAP_ADMIN_PASSWORD", "")
+    email = os.environ.get("BOOTSTRAP_ADMIN_EMAIL", "").strip().lower() or None
+    phone = os.environ.get("BOOTSTRAP_ADMIN_PHONE", "").strip() or None
     if not username or len(password) < 8:
         raise RuntimeError(
             "Set BOOTSTRAP_ADMIN_USERNAME and an 8+ character BOOTSTRAP_ADMIN_PASSWORD."
