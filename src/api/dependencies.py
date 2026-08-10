@@ -19,6 +19,7 @@ from src.modules.identity.models import User
 from src.modules.identity.permissions import ensure_catalogued
 from src.modules.identity.repository import IdentityRepository
 from src.modules.identity.service import IdentityService
+from src.modules.intake_scan.cash_service import CashSheetService
 from src.modules.intake_scan.extractor import GeminiExtractor
 from src.modules.intake_scan.repository import ScanRepository
 from src.modules.intake_scan.service import ScanService
@@ -173,6 +174,33 @@ def get_scan_service(session: DbSession) -> ScanService:
 
 
 ScanServiceDependency = Annotated[ScanService, Depends(get_scan_service)]
+
+
+def get_cash_sheet_service(session: DbSession) -> CashSheetService:
+    """Reading the daily sheet needs the orders to match its rows; importing it
+    needs the three services that own what it writes.
+
+    They are composed here as **services**, not repositories, which is what keeps
+    the import from being able to do anything a person could not do by hand:
+    the balance clamp, the day lock and the `orders.deliver_unpaid` check all
+    live inside them and apply to a row off a photograph exactly as they do to a
+    row off a screen.
+
+    One session across all four, so a sheet's fifteen rows are one transaction's
+    worth of work and the close that reads them afterwards sees all of it.
+    """
+    return CashSheetService(
+        ScanRepository(session),
+        GeminiExtractor(),
+        OrdersRepository(session),
+        get_orders_service(session),
+        get_expenses_service(session),
+        get_staff_service(session),
+        DailyCloseRepository(session),
+    )
+
+
+CashSheetServiceDependency = Annotated[CashSheetService, Depends(get_cash_sheet_service)]
 
 
 def get_staff_service(session: DbSession) -> StaffService:

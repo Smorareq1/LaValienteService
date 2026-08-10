@@ -1,13 +1,13 @@
 from __future__ import annotations
 
-from collections.abc import AsyncIterator
+from collections.abc import AsyncIterator, Sequence
 from contextlib import asynccontextmanager
 from dataclasses import dataclass
 from datetime import date
 from decimal import Decimal
 from uuid import UUID
 
-from sqlalchemy import ColumnElement, Select, cast, func, or_, select
+from sqlalchemy import ColumnElement, Select, case, cast, func, or_, select
 from sqlalchemy import String as SaString
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import selectinload
@@ -23,6 +23,32 @@ from src.modules.orders.models import (
     OrderStatus,
     PaymentMethod,
 )
+
+
+def serial_key(value: str | None) -> str | None:
+    """A booklet serial reduced to what two people writing it would agree on.
+
+    The stored serial is whatever was written when the ticket was captured —
+    `000939`, `#939`, `a-0042`. The printed booklet pads to six digits and the
+    daily sheet of Plan 0005 §1 writes the same ticket as `939`, so comparing
+    them as stored finds nothing.
+
+    Only the leading zeros of an **all-digit** serial are dropped, because only
+    there are they padding. A serial the print shop gives letters (`A-0042`)
+    keeps every character: nothing says its zeros are decoration, and guessing
+    would collapse two booklets into one.
+
+    Lives here, next to the column it describes, rather than in the module that
+    needed it: `intake_scan` may import `orders` and never the other way round
+    (Plan 0003 D2).
+    """
+    if value is None:
+        return None
+    cleaned = " ".join(value.split()).strip(" #").upper()
+    if not cleaned:
+        return None
+    # `lstrip` on "000" leaves nothing, and the number itself is what is meant.
+    return (cleaned.lstrip("0") or "0") if cleaned.isdigit() else cleaned
 
 
 @dataclass(frozen=True)
@@ -177,6 +203,47 @@ class OrdersRepository:
             .order_by(Order.order_date.desc(), Order.daily_number.desc())
         )
         return list((await self.session.scalars(statement)).all())
+
+    async def find_by_serials(self, serials: Sequence[str]) -> dict[str, list[Order]]:
+        """The tickets a whole column of booklet numbers names, in one query.
+
+        The daily sheet of Plan 0005 §1 lists fifteen `#Tomapedido` at a time, and
+        asking `find_by_ticket` fifteen times would be fifteen round trips for one
+        screen.
+
+        Keyed by `serial_key`, which is stricter about spelling than
+        `find_by_ticket` needs to be and has to be: that one compares a photo of a
+        ticket against the ticket, so both sides say `000939`. This compares a
+        *different* piece of paper, where the same ticket is written `939`. The
+        leading zeros are dropped on both sides — and only for an all-digit
+        serial, where they are padding rather than part of the identifier.
+
+        A key can hold more than one ticket. That is not a bug to hide: two rows
+        under one serial is a duplicate somebody has to look at, and returning
+        only the first would decide it silently.
+        """
+        wanted = {serial for serial in serials if serial}
+        if not wanted:
+            return {}
+
+        trimmed = func.upper(func.btrim(Order.booklet_serial, " #"))
+        key = case(
+            (trimmed.op("~")("^[0-9]+$"), func.ltrim(trimmed, "0")),
+            else_=trimmed,
+        )
+        statement = (
+            select(Order)
+            .where(Order.deleted_at.is_(None), key.in_(wanted))
+            .options(selectinload(Order.payments.and_(OrderPayment.deleted_at.is_(None))))
+            .order_by(Order.order_date.desc(), Order.daily_number.desc())
+        )
+
+        found: dict[str, list[Order]] = {}
+        for order in (await self.session.scalars(statement)).all():
+            grouped = serial_key(order.booklet_serial)
+            if grouped is not None:
+                found.setdefault(grouped, []).append(order)
+        return found
 
     async def search(
         self,

@@ -97,6 +97,14 @@ CATALOG: tuple[PermissionSpec, ...] = (
     # be deleted: the day the shop drops the paper booklet, these two go with it.
     PermissionSpec("scans", "create", "Scan a paper ticket to draft an order", True),
     PermissionSpec("scans", "read", "Look up a scan and its photo", True),
+    # The daily sheet (Plan 0005 §1) read through the same module. Reading it is
+    # the collaborator's — it is their sheet — but **importing** it is not: that
+    # one act collects a whole day's money and hands out a whole day's clothes,
+    # and the permissions it borrows underneath (`orders.collect_payment`,
+    # `orders.deliver`, `expenses.create`) are each granted for one ticket at a
+    # time in front of the customer it belongs to. Fifteen at once off a
+    # photograph is a different decision, so it gets a gate of its own.
+    PermissionSpec("scans", "import_close", "Import a scanned daily sheet", False),
     # Not in the plans' tables: device revocation (Plan 0004 D11) needs a
     # permission of its own and it is squarely an administrator's call.
     PermissionSpec("sync.devices", "manage", "List and revoke synchronization devices", False),

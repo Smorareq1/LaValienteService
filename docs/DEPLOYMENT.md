@@ -85,8 +85,9 @@ En **Variables** del servicio de la API:
 | `WEB_CONCURRENCY` | `1` | Ver «Cuántos workers». |
 | `MEDIA_DIR` | `/data/media` | Ya es el valor de la imagen; defínelo solo si mueves el montaje. |
 | `SCAN_STORAGE_PATH` | `/data/media/scans` | Igual que el anterior. |
-| `SCAN_ENABLED` | `false` | Enciéndelo cuando la key esté puesta. |
+| `SCAN_ENABLED` | `false` | Enciéndelo cuando la key esté puesta. Cubre los tres escaneos: boleta, búsqueda y hoja del día. |
 | `GEMINI_API_KEY` | la key | Solo backend; la app nunca la ve (Plan 0003 D1). |
+| `SCAN_CASH_PROMPT_VERSION` | no la definas | `cash_v1` por omisión. Solo se toca para probar una versión nueva del prompt de la hoja «Registro Diario» (Plan 0007 D1). |
 | `DOCS_ENABLED` | no la definas | Con `ENVIRONMENT=production`, `/docs` y `/openapi.json` no se publican. Ponla en `true` para abrirlos un rato sin desplegar código. |
 | `CORS_ORIGINS` | no la definas | Solo hace falta si algún día hay pantalla web. Vacía, la API no manda encabezados CORS, que es lo correcto para un cliente que no es un navegador. |
 

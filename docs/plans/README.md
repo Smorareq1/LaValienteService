@@ -42,6 +42,7 @@ docs/plans/
 | [0004](0004-sincronizacion-offline/PLAN.md) | Offline-first y sincronización (fundacional — precede a 0001) | 🚧 En progreso | `sync`, APP Flutter | 2026-08-05 |
 | [0005](0005-registro-diario-cierre/PLAN.md) | Registro diario: personal, inventario, gastos y cierre (+ orden consolidado de migraciones de la fase 1) | ✔️ Implementado | `staff`, `inventory`, `expenses`, `daily_close` | 2026-08-05 |
 | [0006](0006-ui-app-fase1/PLAN.md) | PRD de UI: módulos y pantallas de la app (fase 1) | ✔️ Fase 1 completa | APP Flutter, `design_system` | 2026-08-08 |
+| [0007](0007-escaneo-hoja-caja/PLAN.md) | Escanear la hoja de caja e importar el día; compartir desde WhatsApp | ✔️ Implementado (falta iOS y el set dorado) | `intake_scan`, `orders`, `identity`, APP Flutter | 2026-08-09 |
 
 ### Planes previstos (aún sin documento)
 

@@ -43,10 +43,18 @@ class ScanPurpose(enum.StrEnum):
     corrects anything, so it proposes nothing and produces no diff. Scoring the
     model on rows that never had a draft to get wrong would drag the metric
     toward whatever fraction of the day's photos happened to be deliveries.
+
+    `cash_close` is a third document altogether — the «Registro Diario» sheet of
+    Plan 0005 §1, a whole day's money on one page. It reads with its own prompt
+    and its own schema, and it is the only purpose that ends in the server
+    *writing*: payments, deliveries, expenses and attendance, all of them after a
+    person has confirmed the row. That is why it has `applied_at` below and the
+    other two do not.
     """
 
     INTAKE = "intake"
     LOOKUP = "lookup"
+    CASH_CLOSE = "cash_close"
 
 
 def _enum_values(enum_cls: type[enum.Enum]) -> list[str]:
@@ -129,6 +137,19 @@ class ScanJob(Base):
     #: actually saved (D7). This is the quality metric of §9 — the only one
     #: measured on real tickets instead of on the golden set.
     corrections: Mapped[dict[str, Any] | None] = mapped_column(JSONB, nullable=True)
+
+    #: When a `cash_close` sheet was imported, and what the import did.
+    #:
+    #: The pair is the idempotency guard of the only purpose that writes. The ids
+    #: of the payments and expenses it creates are derived from this scan, so a
+    #: retried request lands on rows that already exist and is recognised rather
+    #: than duplicated — but a *second deliberate* import of the same sheet is a
+    #: different mistake, and this is what lets the endpoint refuse it by name
+    #: instead of quietly collecting the day's money twice.
+    applied_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True), nullable=True
+    )
+    applied_result: Mapped[dict[str, Any] | None] = mapped_column(JSONB, nullable=True)
 
     created_by_id: Mapped[UUID] = mapped_column(Uuid, ForeignKey("users.id"))
     created_at: Mapped[datetime] = mapped_column(

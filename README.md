@@ -129,12 +129,20 @@ vuelto que se da en el mostrador no es dinero que se quedó en la caja. Entregar
 pendiente exige `orders.deliver_unpaid`: fiar es una decisión, no un descuido, y el pedido
 sigue aceptando pagos después de entregado, que es como se salda.
 
-## Escaneo de boleta con IA (módulo temporal)
+## Escaneo con IA (módulo temporal)
 
-`intake_scan` lee una fotografía de la boleta de papel con Gemini y devuelve un **borrador**
-que la app usa para prellenar la toma de pedido. Es temporal por diseño (plan 0003 D2): el día
-que la operación abandone el talonario, retirarlo es apagar el flag, borrar
-`src/modules/intake_scan/`, sus endpoints y sus ajustes, y una migración de limpieza.
+`intake_scan` lee una fotografía de papel con Gemini y devuelve algo que una persona confirma.
+Es temporal por diseño (plan 0003 D2): el día que la operación abandone el papel, retirarlo es
+apagar el flag, borrar `src/modules/intake_scan/`, sus endpoints y sus ajustes, y una migración
+de limpieza.
+
+Lee **dos documentos distintos**, con su propio prompt y su propio esquema cada uno:
+
+| Documento | Endpoint | Qué devuelve |
+| --- | --- | --- |
+| Boleta del talonario | `POST /scans` | Un **borrador** para prellenar la toma de pedido. |
+| Boleta ya existente | `POST /scans/lookup` | **Cuál** es, para entregarla sin teclear. |
+| Hoja «Registro Diario» | `POST /scans/cash-close` | Las filas del día, **emparejadas** contra la base. |
 
 Está **apagado por omisión**. Para encenderlo hacen falta dos variables:
 
@@ -144,14 +152,31 @@ GEMINI_API_KEY=...   # solo en el backend; la app nunca la ve (D1)
 ```
 
 Los demás ajustes tienen valores por omisión razonables: `SCAN_MODEL` (`gemini-2.5-flash`),
-`SCAN_PROMPT_VERSION` (`v1`), `SCAN_TIMEOUT_S` (30), `SCAN_MAX_IMAGE_MB` (8),
-`SCAN_DAILY_LIMIT` (200, el control de costos), `SCAN_STORAGE_PATH` (`./media/scans`) y
-`SCAN_IMAGE_RETENTION_DAYS` (90).
+`SCAN_PROMPT_VERSION` (`v1`), `SCAN_CASH_PROMPT_VERSION` (`cash_v1`), `SCAN_TIMEOUT_S` (30),
+`SCAN_MAX_IMAGE_MB` (8), `SCAN_DAILY_LIMIT` (200, el control de costos), `SCAN_STORAGE_PATH`
+(`./media/scans`) y `SCAN_IMAGE_RETENTION_DAYS` (90).
 
 La regla que no se rompe: **la IA nunca guarda un pedido.** Produce un borrador que una persona
 revisa y confirma, y el motor de precios del plan 0001 §6 recalcula todos los montos — los
 totales leídos de la foto solo sirven para avisar de una discrepancia. Y si Gemini falla, tarda
 o devuelve basura, la captura a mano funciona entera sin este módulo (D8).
+
+### La hoja del día es la excepción que escribe
+
+`POST /scans/cash-close/{id}/apply` es el único sitio de este módulo que **escribe**, y por eso
+tiene su propio permiso (`scans.import_close`, que el colaborador no tiene por omisión). Lo que
+lo mantiene dentro de las reglas:
+
+- lo que se aplica **no** es lo que se leyó: es lo que una persona confirmó fila por fila en la
+  pantalla, sin una sola `confidence` en el cuerpo de la petición;
+- cada escritura pasa por el service del módulo dueño, así que el cobro se sigue recortando al
+  saldo, entregar debiendo sigue exigiendo `orders.deliver_unpaid` y un día cerrado sigue
+  rechazando;
+- **fila por fila y nunca todo o nada**: una línea mala de quince no deshace las catorce buenas,
+  y la respuesta dice qué pasó con cada una;
+- los ids de los pagos y gastos se derivan del escaneo (uuid5), así que reintentar una petición
+  cuya respuesta se perdió aterriza sobre las filas que ya existen en vez de duplicarlas. Un
+  segundo intento **deliberado** de importar la misma hoja se rechaza con 409.
 
 Las fotos contienen datos personales, así que se sirven solo con `scans.read` y se borran
 pasado su plazo:

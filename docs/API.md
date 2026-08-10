@@ -313,6 +313,9 @@ con estar autenticado.
 |---|---|---|
 | `POST` | `/api/v1/scans` | `scans.create` |
 | `POST` | `/api/v1/scans/lookup` | `scans.create` |
+| `POST` | `/api/v1/scans/cash-close` | `scans.create` |
+| `POST` | `/api/v1/scans/cash-close/{scan_id}/apply` | `scans.import_close` |
+| `GET` | `/api/v1/scans/cash-close/{scan_id}` | `scans.read` |
 | `GET` | `/api/v1/scans/{scan_id}` | `scans.read` |
 | `GET` | `/api/v1/scans/{scan_id}/image` | `scans.read` |
 

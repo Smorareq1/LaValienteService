@@ -63,6 +63,11 @@ class Settings(BaseSettings):
     scan_model: str = "gemini-2.5-flash"
     #: Debe existir como `prompts/{version}.md` (D5).
     scan_prompt_version: str = "v1"
+    #: El de la hoja «Registro Diario», que es otro documento y por tanto otro
+    #: prompt con su propia historia. Versionado aparte a propósito: mejorar la
+    #: lectura de la boleta no debe obligar a revalidar la del cierre, ni al
+    #: revés.
+    scan_cash_prompt_version: str = "cash_v1"
     scan_timeout_s: int = Field(default=30, gt=0, le=120)
     scan_max_image_mb: int = Field(default=8, gt=0, le=50)
     #: Tope diario de escaneos, que es el control de costos del §12.2.

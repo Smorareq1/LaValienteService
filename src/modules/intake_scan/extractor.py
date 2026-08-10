@@ -1,18 +1,26 @@
-"""Reading a ticket with a vision model (Plan 0003 D3, D5, D6).
+"""Reading a paper document with a vision model (Plan 0003 D3, D5, D6).
 
 The provider sits behind :class:`ScanExtractor` so that changing model — or
 vendor — is this one file and nothing else (D6). Everything downstream works on
-:class:`RawScan`, which is our shape, not Gemini's.
+:class:`RawScan` or :class:`RawCashSheet`, which are our shapes, not Gemini's.
 
 The call goes over plain HTTP with `httpx` rather than a vendor SDK. Two reasons:
 the SDK would be a dependency the retirement of this module has to unwind (D2),
 and what we need of the API is one POST with a JSON schema attached — the part of
 it that is stable.
+
+Two documents come through here, and :class:`ScanDocument` is the whole of the
+difference between them: which prompt is loaded and which schema is attached.
+The ticket is one customer's order; the «Registro Diario» sheet is a whole day's
+money. They share the transport, the retry, the timeout and the daily budget —
+and nothing else, because a prompt that tried to describe both would describe
+neither well.
 """
 
 from __future__ import annotations
 
 import base64
+import enum
 import json
 import time
 from dataclasses import dataclass
@@ -39,7 +47,24 @@ DRY_CODES = ("T40", "T50", "T60")
 HAND_WASH_CODES = ("N2", "N3", "N4")
 EXTRA_CODES = ("rins", "spin", "t10_lapses", "urgent")
 
+#: The marks a highlighter leaves on an income row of the daily sheet, and what
+#: each one means (Plan 0005 §1). Closed list for the same reason as the codes
+#: above: a colour nobody defined is a misreading, not a new kind of money.
+CASH_MARKS = ("none", "transfer", "invoice", "supply")
+
 MIME_BY_FORMAT = {"jpg": "image/jpeg", "png": "image/png", "webp": "image/webp"}
+
+
+class ScanDocument(enum.StrEnum):
+    """Which piece of paper is in the photograph.
+
+    Not a `ScanPurpose`: that column records *why* a photo was taken and is what
+    the quality metric of §9 groups by. This is which prompt and which schema the
+    call needs, and it never reaches the database.
+    """
+
+    TICKET = "ticket"
+    CASH_SHEET = "cash_sheet"
 
 
 class ScanFailure(ConflictError):
@@ -64,7 +89,9 @@ class Extraction:
 class ScanExtractor(Protocol):
     """Turn a photograph into the raw shape of §6."""
 
-    async def extract(self, image: bytes) -> Extraction: ...
+    async def extract(
+        self, image: bytes, *, document: ScanDocument = ScanDocument.TICKET
+    ) -> Extraction: ...
 
 
 def load_prompt(version: str) -> str:
@@ -195,13 +222,135 @@ def response_schema() -> dict[str, Any]:
     }
 
 
+def cash_response_schema() -> dict[str, Any]:
+    """The JSON Schema for the «Registro Diario» sheet (Plan 0005 §1).
+
+    Two things about its shape are worth saying out loud.
+
+    It is a **list of blocks**, because the printed sheet stacks three days on one
+    page and a photograph of it catches whichever of them happen to be filled in.
+    Flattening that into one day would silently merge two days' money.
+
+    Amounts *are* read here, unlike on the ticket, where D4 forbids it. There is
+    no catalog to recompute a day's cash from: the sheet is the record. What
+    replaces the pricing engine as the check is the database itself — every
+    income row is matched against the ticket it names and compared with the
+    balance actually owed (`cash_normalization`), and nothing is charged until a
+    person has confirmed the row.
+    """
+    return {
+        "type": "object",
+        "properties": {
+            "blocks": {
+                "type": "array",
+                "description": (
+                    "One per REGISTRO DIARIO block with handwriting on it. "
+                    "Blank blocks are omitted entirely."
+                ),
+                "items": {
+                    "type": "object",
+                    "properties": {
+                        "date": {
+                            "type": "object",
+                            "description": "Written by 'DIA/ FECHA' as 04-08-26.",
+                            "properties": {
+                                "day": _leaf("integer", "Day of the month."),
+                                "month": _leaf("integer", "Month, 1 to 12."),
+                                "year": _leaf("integer", "Two or four digits."),
+                            },
+                        },
+                        "incomes": {
+                            "type": "array",
+                            "description": "Left half. Only rows with something written.",
+                            "items": {
+                                "type": "object",
+                                "properties": {
+                                    "booklet_serial": _leaf(
+                                        "string", "The '#Tomapedido' of the ticket collected."
+                                    ),
+                                    "customer_text": _leaf(
+                                        "string", "The customer's name as written."
+                                    ),
+                                    "amount": _leaf("number", "'Ingreso Q', in quetzales."),
+                                    "mark": _leaf(
+                                        "string",
+                                        "Highlighter colour: one of "
+                                        f"{', '.join(CASH_MARKS)}. "
+                                        "pink=transfer, yellow=invoice, blue=supply.",
+                                    ),
+                                },
+                            },
+                        },
+                        "expenses": {
+                            "type": "array",
+                            "description": "Right half. Only rows with something written.",
+                            "items": {
+                                "type": "object",
+                                "properties": {
+                                    "object_text": _leaf(
+                                        "string",
+                                        "Column '#Factura', which is really the object "
+                                        "paid for ('2 sac', '#7', 'Claudia').",
+                                    ),
+                                    "description": _leaf(
+                                        "string",
+                                        "Column 'Proveedor', which is really the "
+                                        "description ('gas', 'moto', 'detergente').",
+                                    ),
+                                    "amount": _leaf("number", "'Gasto Q', in quetzales."),
+                                    "observations": _leaf("string", "The notes column."),
+                                },
+                            },
+                        },
+                        "attendance": {
+                            "type": "array",
+                            "description": "The ENTRADA / ALMUERZO / SALIDA line of the block.",
+                            "items": {
+                                "type": "object",
+                                "properties": {
+                                    "employee_text": _leaf(
+                                        "string", "The name or signature on that line."
+                                    ),
+                                    "clock_in": _leaf("string", "'Entrada', as 7:00."),
+                                    "lunch": _leaf("string", "'Almuerzo'. Often just a dash."),
+                                    "clock_out": _leaf("string", "'Salida', as 12:40."),
+                                },
+                            },
+                        },
+                        "totals": {
+                            "type": "object",
+                            "description": "The sums written at the foot. CROSS-CHECK ONLY.",
+                            "properties": {
+                                "income_total": _leaf("number", "Sum of the income column."),
+                                "expenses_total": _leaf("number", "Sum of the expense column."),
+                                "accumulated": _leaf("number", "'Total acumulado': net."),
+                            },
+                        },
+                    },
+                },
+            }
+        },
+        "required": ["blocks"],
+    }
+
+
+#: Which prompt and which schema each document is read with. Adding a third piece
+#: of paper is adding a row here and a file in `prompts/`.
+_DOCUMENTS = {
+    ScanDocument.TICKET: ("scan_prompt_version", response_schema),
+    ScanDocument.CASH_SHEET: ("scan_cash_prompt_version", cash_response_schema),
+}
+
+
 class GeminiExtractor:
     """The provider we use today (D1: the key never leaves the backend)."""
 
     def __init__(self, client: httpx.AsyncClient | None = None) -> None:
         self._client = client
 
-    async def extract(self, image: bytes) -> Extraction:
+    async def extract(
+        self, image: bytes, *, document: ScanDocument = ScanDocument.TICKET
+    ) -> Extraction:
         settings = get_settings()
         if settings.gemini_api_key is None:
             raise ScanFailure("The scan service has no API key configured.")
@@ -210,7 +359,9 @@ class GeminiExtractor:
         if detected is None:
             raise ScanFailure("That file is not a JPEG, PNG or WebP image.")
 
-        prompt = load_prompt(settings.scan_prompt_version)
+        setting_name, schema = _DOCUMENTS[document]
+        prompt_version: str = getattr(settings, setting_name)
+        prompt = load_prompt(prompt_version)
         body = {
             "contents": [
                 {
@@ -227,7 +378,7 @@ class GeminiExtractor:
             ],
             "generationConfig": {
                 "responseMimeType": "application/json",
-                "responseSchema": response_schema(),
+                "responseSchema": schema(),
                 # Zero: transcription is not a task that benefits from variety,
                 # and the same photo should read the same way twice.
                 "temperature": 0,
@@ -241,7 +392,7 @@ class GeminiExtractor:
         return Extraction(
             payload=payload,
             model=settings.scan_model,
-            prompt_version=settings.scan_prompt_version,
+            prompt_version=prompt_version,
             latency_ms=latency_ms,
         )
 
