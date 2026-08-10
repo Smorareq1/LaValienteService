@@ -48,7 +48,7 @@ preparado el terreno para las etapas siguientes: cierre diario y venta de invent
 | **NIT** | Identificación tributaria del cliente (el campo impreso como "Factura" en la boleta realmente captura el NIT). |
 | **No. Piezas** | Total de prendas del pedido. **Debe coincidir** con la suma del detalle de prendas. |
 | **Lavado por peso** | Libras × precio por libra (hoy Q2.50/lb). |
-| **Lavado por tina** | Según la cantidad de agua de la tina de la lavadora: **G**rande Q30, m**E**diano Q25, **P**equeño Q20. Puede cobrarse más de una tina. |
+| **Lavado por tina** | Según la cantidad de agua de la tina de la lavadora: **G**rande Q30, m**E**diano Q25, **P**equeño Q20. Puede cobrarse más de una tina. En el catálogo el servicio se llama **«Lavado»** (código `wash_tub`, unidad "tina"): es el de todos los días y el tamaño ya lo dice la opción. |
 | **Secado** | Por tiempo, base 40 min a temperatura media, en lapsos de 10 min: **T40** Q20, **T50** Q25, **T60** Q30. |
 | **Nivel** (lavado a mano) | Por cantidad de piezas lavadas a mano: **N2** = 1–4 piezas Q5, **N3** = 5–9 Q10, **N4** = 10–13 Q15. |
 | **R — Rins** | Se agregó suavizante. Q10 c/u; puede cobrarse N veces en un pedido (ej. 3 Rins). |

@@ -4,6 +4,17 @@ Idempotent: services, options and garment types are matched by their natural key
 and prices are only opened when none is in force, so re-running after a manual
 price change does not resurrect the old price.
 
+What it *does* reconcile is how each row **reads**: the name, the unit label and
+the piece range of an option. Those are wording, not money — when the counter
+asks for a different word ("Lavado", not "Lavado por tina") the change has to
+reach a database that already has the row, and the alternative is renaming by
+hand in production. Prices stay untouched, which is the line that matters.
+
+The catch, and it is deliberate: this file is the source of truth for the
+wording, so a rename made through the catalog screen (`PATCH
+/catalog/service-types/{id}`) is reverted the next time this runs. Rename here
+too, or do not run it again.
+
     python -m scripts.seed_catalog
 """
 
@@ -44,13 +55,16 @@ SERVICES: tuple[SeedService, ...] = (
     ),
     (
         "wash_tub",
-        "Lavado por tina",
+        # "Lavado" a secas, como lo pide el mostrador: es el servicio de todos
+        # los días y el tamaño de la tina ya lo dice la opción. La unidad sigue
+        # siendo la tina, así que la línea se lee "Q30.00 por tina".
+        "Lavado",
         PricingMode.TIERED,
         "tina",
         None,
         (
-            # El nombre del tamaño solo: la opción se lee bajo el servicio que
-            # ya dice "tina", y repetirlo llena la fila de la boleta de ruido.
+            # El nombre del tamaño solo: la opción se lee bajo el servicio, y
+            # repetir "tina" en cada fila llena la boleta de ruido.
             ("G", "Grande", "30.00", None, None),
             ("E", "Mediano", "25.00", None, None),
             ("P", "Pequeño", "20.00", None, None),
@@ -118,6 +132,7 @@ GARMENT_TYPES: tuple[str, ...] = (
 async def seed_catalog() -> None:
     async with AsyncSessionFactory() as session:
         created_services = 0
+        renamed = 0
         opened_prices = 0
 
         for order, (code, name, mode, unit, price, options) in enumerate(SERVICES):
@@ -133,6 +148,8 @@ async def seed_catalog() -> None:
                 session.add(service)
                 await session.flush()
                 created_services += 1
+            else:
+                renamed += _reword(service, name=name, unit_label=unit)
 
             option_ids: dict[str, ServiceOption] = {}
             for option_order, (
@@ -159,6 +176,13 @@ async def seed_catalog() -> None:
                     )
                     session.add(option)
                     await session.flush()
+                else:
+                    renamed += _reword(
+                        option,
+                        name=option_name,
+                        min_quantity=min_quantity,
+                        max_quantity=max_quantity,
+                    )
                 option_ids[option_code] = option
 
             if price is not None:
@@ -178,8 +202,24 @@ async def seed_catalog() -> None:
         await session.commit()
         print(
             f"Catalog seeded: {created_services} services, {opened_prices} prices, "
-            f"{created_garments} garment types (existing rows left untouched)."
+            f"{created_garments} garment types, {renamed} rows reworded "
+            "(prices left untouched)."
         )
+
+
+def _reword(row: ServiceType | ServiceOption, **wording: object) -> int:
+    """Bring an existing row's wording in line with the seed. Returns 1 if it moved.
+
+    Only assigns what actually differs: a no-op assignment would still count as
+    a change for the session hook, take a feed position and bump the version, so
+    every device would re-download the whole catalog on each run of this script.
+    """
+    changed = False
+    for field, value in wording.items():
+        if getattr(row, field) != value:
+            setattr(row, field, value)
+            changed = True
+    return 1 if changed else 0
 
 
 async def _ensure_price(
