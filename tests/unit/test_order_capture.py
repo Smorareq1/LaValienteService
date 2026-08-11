@@ -289,15 +289,22 @@ class TestCapture:
         assert order.payments[0].is_advance is True
         assert order.balance == Decimal("20.00")
 
-    async def test_an_advance_larger_than_the_ticket_is_refused(self) -> None:
+    async def test_an_advance_larger_than_the_ticket_is_taken(self) -> None:
+        """The counter takes the money before it knows what the work will cost.
+
+        A customer leaving Q50 on a ticket that prices at Q30 is ordinary: the
+        garments may still need treatments nobody has decided on. The Q20 sit on
+        the ticket as a balance in their favour until delivery.
+        """
         service, repository = build_service()
 
-        with pytest.raises(ConflictError, match="advance is larger"):
-            await service.create(
-                a_ticket(advance_payment=OrderPaymentCreate(amount=Decimal("500.00"))),
-                actor=FakeUser(),  # type: ignore[arg-type]
-            )
-        assert repository.added == []
+        order, _ = await service.create(
+            a_ticket(advance_payment=OrderPaymentCreate(amount=Decimal("50.00"))),
+            actor=FakeUser(),  # type: ignore[arg-type]
+        )
+
+        assert order.balance == Decimal("-20.00")
+        assert repository.added == [order]
 
     async def test_charge_snapshots_carry_the_price_of_the_day(self) -> None:
         """D2: the ticket is a document, not a view over today's catalog."""
