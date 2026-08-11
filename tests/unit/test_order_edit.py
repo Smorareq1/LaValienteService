@@ -303,13 +303,20 @@ class TestEdit:
         assert order.paid_total == Decimal("10.00")
         assert order.balance == Decimal("10.00")
 
-    async def test_an_edit_that_drops_below_what_was_paid_is_a_refund(self) -> None:
-        """And a refund is a cash movement this module cannot record (§7.3)."""
+    async def test_an_edit_may_drop_below_what_was_paid(self) -> None:
+        """The customer paid before anyone knew what the clothes would need.
+
+        Q25 left on a ticket that the edit prices at Q20 is not an error: the
+        remaining Q5 belong to the customer and go back at delivery, which the
+        ticket says by carrying a balance in their favour.
+        """
         service, repository = build_service(an_order(paid=Decimal("25.00")))
 
-        with pytest.raises(ConflictError, match="already has"):
-            await service.update(uuid4(), an_edit(), actor=FakeUser())  # type: ignore[arg-type]
-        assert repository.commits == 0
+        order, _ = await service.update(uuid4(), an_edit(), actor=FakeUser())  # type: ignore[arg-type]
+
+        assert order.total == Decimal("20.00")
+        assert order.balance == Decimal("-5.00")
+        assert repository.commits == 1
 
     async def test_a_manual_discount_still_demands_its_permission(self) -> None:
         service, _ = build_service(an_order())

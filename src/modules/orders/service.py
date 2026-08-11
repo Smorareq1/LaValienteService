@@ -175,8 +175,13 @@ class OrdersService:
         total_pieces = sum(garment.quantity for garment in data.garments)
         priced = await self._price(data, order_date, total_pieces)
 
-        if data.advance_payment is not None and data.advance_payment.amount > priced.total:
-            raise ConflictError("The advance is larger than what the order costs.")
+        # An advance larger than the ticket is *allowed*, and deliberately so:
+        # the counter takes the money before anyone knows what the clothes will
+        # need. A customer leaves Q100 on a ticket that ends up costing Q80, and
+        # the Q20 go back when the laundry is handed over. The ticket carries a
+        # negative balance until then, which is what tells the counter there is
+        # change to give — the alternative was refusing the money a customer is
+        # holding out.
 
         last_error: IntegrityError | None = None
         for _attempt in range(MAX_DAILY_NUMBER_ATTEMPTS):
@@ -384,14 +389,12 @@ class OrdersService:
         total_pieces = sum(garment.quantity for garment in data.garments)
         priced = await self._price(data, order.order_date, total_pieces)
 
-        if priced.total < order.paid_total:
-            # The ticket would end up costing less than has already been paid,
-            # which is a refund and not an edit — and refunds are a cash movement
-            # this module has no way to record (§7.3).
-            raise ConflictError(
-                f"The order already has {order.paid_total} paid, more than the new "
-                f"total of {priced.total}."
-            )
+        # A corrected ticket may end up below what has already been paid, for the
+        # same reason an advance may exceed the total: the treatments a garment
+        # needs are decided after the money was taken. What is left over stays on
+        # the ticket as a negative balance and goes back to the customer at
+        # delivery; it is not income, and the daily close counts it where it
+        # always was — on the day the payment came in.
 
         order.booklet_serial = data.booklet_serial
         order.customer_id = customer_id
@@ -645,7 +648,18 @@ class OrdersService:
         Change handed back at the counter is not a payment: recording Q100 against
         a Q75 ticket would put twenty-five quetzales in the books that never
         stayed in the drawer.
+
+        The intake advance is the one exception and it does not come through here
+        (`create` builds it directly): there the extra is money the customer
+        chose to leave, not change the counter invented, and the ticket carries
+        it as a balance in their favour.
         """
+        if order.balance <= 0:
+            owed = -order.balance
+            raise ConflictError(
+                "That order has nothing left to collect"
+                + (f"; {owed} is owed back to the customer." if owed > 0 else ".")
+            )
         if data.amount > order.balance:
             raise ConflictError(
                 f"The payment is larger than the balance of {order.balance}."
