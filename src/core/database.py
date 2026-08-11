@@ -1,5 +1,5 @@
 from collections.abc import AsyncGenerator
-from typing import Any, ClassVar
+from typing import Any
 
 from sqlalchemy import MetaData
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_async_engine
@@ -29,7 +29,13 @@ class Base(DeclarativeBase):
     #: database fills on write and a response schema that reads it right after
     #: committing, so this belongs on the base and not on each model that
     #: remembers to ask.
-    __mapper_args__: ClassVar[dict[str, Any]] = {"eager_defaults": True}
+    #:
+    #: The ``noqa`` settles a disagreement between the two checkers: RUF012
+    #: wants a ``ClassVar`` here, and ``ClassVar`` is exactly what mypy rejects,
+    #: because ``DeclarativeBase`` already declares ``__mapper_args__`` as an
+    #: instance attribute. SQLAlchemy owns this name and only ever reads it, so
+    #: the shared-mutable-default hazard the rule is about does not apply.
+    __mapper_args__: dict[str, Any] = {"eager_defaults": True}  # noqa: RUF012
 
 
 settings = get_settings()
