@@ -325,6 +325,22 @@ class TestDelivery:
         assert order.status is OrderStatus.DELIVERED
         assert order.balance == Decimal("100.00")
 
+    async def test_an_overpaid_ticket_is_handed_over_by_anyone(self) -> None:
+        """Nothing is owed, so nothing is being lent.
+
+        The customer left Q120 on a ticket that closed at Q100; the Q20 go back
+        across the counter and the ticket carries them as a negative balance.
+        Asking for the lending permission here would stop the counter from
+        handing back clothes that are more than paid for.
+        """
+        order = an_order(paid=Decimal("120.00"))
+        service, _ = build_service(order, permissions=set())
+
+        await service.deliver(order.id, OrderDeliver(), actor=an_actor())
+
+        assert order.status is OrderStatus.DELIVERED
+        assert order.balance == Decimal("-20.00")
+
 
 class TestCancellation:
     async def test_it_records_who_and_why(self) -> None:
